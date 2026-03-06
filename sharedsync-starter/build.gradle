@@ -1,0 +1,21 @@
+plugins {
+    id "java-library"
+    id "maven-publish"
+}
+
+dependencies {
+    // AutoConfig 노출
+    api(project(":sharedsync-autoconfigure"))
+
+    // ★ WebSocket/STOMP/Messaging 필수
+    api 'org.springframework.boot:spring-boot-starter-websocket'
+
+    // ★ Spring Messaging (MessageMapping, SendTo, Payload 등)
+    api 'org.springframework:spring-messaging'
+
+    // ★ JSON 직렬화 등 기본 부트 의존성 (필요 시)
+    api 'org.springframework.boot:spring-boot-starter'
+
+    // ★ Redis 필수
+    api 'org.springframework.boot:spring-boot-starter-data-redis'
+}

@@ -1,0 +1,4 @@
+rootProject.name = "sharedsync"
+
+include("sharedsync-autoconfigure")
+include("sharedsync-starter")

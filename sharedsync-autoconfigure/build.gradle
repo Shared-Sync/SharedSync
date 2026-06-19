@@ -12,4 +12,7 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
+    // 통합 테스트(AutoCacheRepository DB 경로 검증)용 — 실제 Postgres 연결
+    testRuntimeOnly("org.postgresql:postgresql")
+
 }

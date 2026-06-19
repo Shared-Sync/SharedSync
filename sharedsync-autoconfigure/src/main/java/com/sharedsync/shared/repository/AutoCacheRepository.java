@@ -21,16 +21,20 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.data.redis.core.RedisTemplate;
 
-import com.sharedsync.shared.annotation.Cache;
-import com.sharedsync.shared.annotation.CacheEntity;
-import com.sharedsync.shared.annotation.CacheId;
-import com.sharedsync.shared.annotation.EntityConverter;
-import com.sharedsync.shared.annotation.IgnoreShared;
 import com.sharedsync.shared.annotation.ParentId;
 import com.sharedsync.shared.annotation.TableName;
 import com.sharedsync.shared.dto.CacheDto;
 import com.sharedsync.shared.history.HistoryAction;
 import com.sharedsync.shared.id.IdPoolService;
+import com.sharedsync.shared.repository.support.CacheEntityMetadata;
+import com.sharedsync.shared.repository.support.DatabaseReader;
+import com.sharedsync.shared.repository.support.DatabaseWriter;
+import com.sharedsync.shared.repository.support.DeletedSetTracker;
+import com.sharedsync.shared.repository.support.EntityDtoConverter;
+import com.sharedsync.shared.repository.support.IdGenerator;
+import com.sharedsync.shared.repository.support.IdTypeConverter;
+import com.sharedsync.shared.repository.support.ParentIndex;
+import com.sharedsync.shared.repository.support.ReflectionSupport;
 import com.sharedsync.shared.storage.PresenceStorage;
 
 import jakarta.annotation.PostConstruct;
@@ -58,6 +62,30 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     @PersistenceContext
     private EntityManager entityManager;
 
+    /** 리플렉션으로 1회 도출되는 불변 엔티티 메타데이터. */
+    private final CacheEntityMetadata<T, ID, DTO> metadata;
+
+    /** ID 타입 변환/임시 ID 판별 협력자. */
+    private final IdTypeConverter<T, ID> idType;
+
+    /** 삭제 추적 Set 협력자. */
+    private final DeletedSetTracker<DTO> deletedSet;
+
+    /** 부모→자식 보조 인덱스 협력자. */
+    private final ParentIndex<DTO> parentIndex;
+
+    /** DTO↔Entity 변환/병합 협력자. */
+    private final EntityDtoConverter<T, ID, DTO> converter;
+
+    /** ID 발급(IdPool/음수 임시) 협력자. */
+    private final IdGenerator<T, ID, DTO> idGenerator;
+
+    /** JPA Criteria 기반 DB 조회 협력자. */
+    private final DatabaseReader<T, ID, DTO> dbReader;
+
+    /** EntityManager 기반 DB 영속 프리미티브 협력자. */
+    private final DatabaseWriter<T, ID, DTO> dbWriter;
+
     private final Class<DTO> dtoClass;
     private final String cacheKeyPrefix;
     private final Field idField;
@@ -82,140 +110,34 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
 
     @SuppressWarnings("unchecked")
     public AutoCacheRepository() {
-        // 제네릭 타입에서 DTO 클래스 추출
-        Type superClass = getClass().getGenericSuperclass();
-        if (superClass instanceof ParameterizedType) {
-            Type[] typeArgs = ((ParameterizedType) superClass).getActualTypeArguments();
-            this.dtoClass = (Class<DTO>) typeArgs[2];
-        } else {
-            throw new IllegalStateException("DTO 클래스를 추출할 수 없습니다.");
-        }
-
-        // @CacheEntity 어노테이션에서 키 타입 추출
-        Cache cacheAnnotation = dtoClass.getAnnotation(Cache.class);
-        if (cacheAnnotation == null) {
-            throw new IllegalStateException(dtoClass.getSimpleName() + "에 @CacheEntity 어노테이션이 없습니다.");
-        }
-
-        // keyType이 빈 문자열이면 클래스 이름에서 자동 생성
-        String annotationKeyType = cacheAnnotation.keyType();
-        if (annotationKeyType == null || annotationKeyType.isEmpty()) {
-            // PlanDto -> "plan"
-            this.cacheKeyPrefix = dtoClass.getSimpleName().replace("Dto", "").toLowerCase();
-        } else {
-            this.cacheKeyPrefix = annotationKeyType.toLowerCase();
-        }
-
-        // @AutoRedisTemplate 어노테이션에서 Redis 템플릿 이름 추출
-        String entityName = dtoClass.getSimpleName().replace("Dto", "");
-        this.redisTemplateBeanName = Character.toLowerCase(entityName.charAt(0)) + entityName.substring(1) + "Redis";
-
-        // 필드와 메서드 찾기
-        this.idField = findFieldWithAnnotation(dtoClass, CacheId.class);
-        if (this.idField == null) {
-            throw new IllegalStateException(dtoClass.getSimpleName() + "에 @CacheId 어노테이션이 붙은 필드가 없습니다.");
-        }
-        this.idField.setAccessible(true);
-
-        this.parentIdFields = new ArrayList<>();
-        this.parentEntityClassMap = new java.util.HashMap<>();
-
-        for (Field field : dtoClass.getDeclaredFields()) {
-            if (field.isAnnotationPresent(ParentId.class)) {
-                field.setAccessible(true);
-                this.parentIdFields.add(field);
-                ParentId parentIdAnnotation = field.getAnnotation(ParentId.class);
-                if (parentIdAnnotation != null && parentIdAnnotation.value() != Object.class) {
-                    this.parentEntityClassMap.put(field, parentIdAnnotation.value());
-                }
-            }
-        }
-
-        this.entityConverterMethod = findMethodWithAnnotation(dtoClass, EntityConverter.class);
-        if (this.entityConverterMethod == null) {
-            throw new IllegalStateException(dtoClass.getSimpleName() + "에 @EntityConverter 어노테이션이 붙은 메서드가 없습니다.");
-        }
-        this.entityConverterMethod.setAccessible(true);
-
-        Field detectedEntityIdField = locateEntityIdField(getEntityClass());
-        if (detectedEntityIdField == null) {
-            throw new IllegalStateException("@Id 필드를 찾을 수 없습니다: " + getEntityClass().getSimpleName());
-        }
-        detectedEntityIdField.setAccessible(true);
-        this.entityIdField = detectedEntityIdField;
-        @SuppressWarnings("unchecked")
-        Class<ID> detectedIdClass = (Class<ID>) detectedEntityIdField.getType();
-        this.idClass = detectedIdClass;
-
-        // @IgnoreShared 필드 미리 캐싱 (동기화 시 보존용)
-        List<Field> ignored = new ArrayList<>();
-        for (Field f : getEntityClass().getDeclaredFields()) {
-            if (f.isAnnotationPresent(IgnoreShared.class)) {
-                f.setAccessible(true);
-                ignored.add(f);
-            }
-        }
-        this.ignoredEntityFields = Collections.unmodifiableList(ignored);
-
-        this.dtoFields = Arrays.stream(dtoClass.getDeclaredFields())
-                .filter(field -> !Modifier.isStatic(field.getModifiers()))
-                .peek(field -> field.setAccessible(true))
-                .collect(Collectors.collectingAndThen(Collectors.toList(), Collections::unmodifiableList));
-
-        // @CacheEntity가 붙은 숫자형 ID 엔티티는 무조건 IdPool 사용
-        // sequenceName은 테이블명_컬럼명_seq 패턴으로 자동 유도
-        CacheEntity cacheEntityAnnotation = getEntityClass().getAnnotation(CacheEntity.class);
-        if (cacheEntityAnnotation != null && isNumericIdType(this.idClass)) {
-            this.allocationSize = cacheEntityAnnotation.allocationSize();
-            this.sequenceName = deriveSequenceName(getEntityClass(), this.entityIdField);
-            this.useIdPool = true;
-        } else {
-            this.sequenceName = null;
-            this.allocationSize = cacheEntityAnnotation != null ? cacheEntityAnnotation.allocationSize() : 0;
-            this.useIdPool = false;
-        }
-    }
-
-    /**
-     * 엔티티 클래스와 ID 필드로부터 PostgreSQL IDENTITY 시퀀스 이름을 자동 유도합니다.
-     * 결과 형식: {table_name}_{column_name}_seq
-     * (예: time_table + time_table_id → time_table_time_table_id_seq)
-     */
-    private static String deriveSequenceName(Class<?> entityClass, Field idField) {
-        jakarta.persistence.Table tableAnnotation = entityClass.getAnnotation(jakarta.persistence.Table.class);
-        String tableName;
-        if (tableAnnotation != null && tableAnnotation.name() != null && !tableAnnotation.name().isEmpty()) {
-            tableName = tableAnnotation.name();
-        } else {
-            tableName = toSnakeCase(entityClass.getSimpleName());
-        }
-
-        jakarta.persistence.Column columnAnnotation = idField.getAnnotation(jakarta.persistence.Column.class);
-        String columnName;
-        if (columnAnnotation != null && columnAnnotation.name() != null && !columnAnnotation.name().isEmpty()) {
-            columnName = columnAnnotation.name();
-        } else {
-            columnName = toSnakeCase(idField.getName());
-        }
-
-        return tableName + "_" + columnName + "_seq";
-    }
-
-    /**
-     * CamelCase 문자열을 snake_case로 변환합니다.
-     */
-    private static String toSnakeCase(String s) {
-        return s.replaceAll("([A-Z])", "_$1").toLowerCase().replaceFirst("^_", "");
-    }
-
-    /**
-     * ID 타입이 숫자형(Long, Integer 등)인지 확인합니다.
-     * UUID 같은 비숫자 타입은 IdPool을 사용하지 않습니다.
-     */
-    private static boolean isNumericIdType(Class<?> type) {
-        return Number.class.isAssignableFrom(type)
-                || type == long.class || type == int.class
-                || type == short.class || type == byte.class;
+        // 리플렉션 기반 메타데이터 도출은 CacheEntityMetadata 로 위임하고, 결과를 필드로 풀어 보관한다.
+        this.metadata = CacheEntityMetadata.of(getClass());
+        this.dtoClass = metadata.getDtoClass();
+        this.cacheKeyPrefix = metadata.getCacheKeyPrefix();
+        this.redisTemplateBeanName = metadata.getRedisTemplateBeanName();
+        this.idField = metadata.getIdField();
+        this.parentIdFields = metadata.getParentIdFields();
+        this.parentEntityClassMap = metadata.getParentEntityClassMap();
+        this.entityConverterMethod = metadata.getEntityConverterMethod();
+        this.entityIdField = metadata.getEntityIdField();
+        this.idClass = metadata.getIdClass();
+        this.ignoredEntityFields = metadata.getIgnoredEntityFields();
+        this.dtoFields = metadata.getDtoFields();
+        this.sequenceName = metadata.getSequenceName();
+        this.allocationSize = metadata.getAllocationSize();
+        this.useIdPool = metadata.isUseIdPool();
+        this.idType = new IdTypeConverter<>(metadata.getIdClass(), metadata.getEntityIdField(),
+                metadata.isUseIdPool());
+        // CacheStore 는 호출마다 재해석되도록 Supplier(this::getCacheStore)로 전달 (지연 평가).
+        this.deletedSet = new DeletedSetTracker<>(metadata.getCacheKeyPrefix(), metadata.isUseIdPool(),
+                this::getCacheStore);
+        this.parentIndex = new ParentIndex<>(this::getCacheStore);
+        // EntityManager 는 필드주입 이후 평가되도록 Supplier 로 전달.
+        this.converter = new EntityDtoConverter<>(metadata, idType, () -> entityManager);
+        this.idGenerator = new IdGenerator<>(metadata, this::getCacheStore,
+                () -> applicationContext.getBean(IdPoolService.class), () -> entityManager);
+        this.dbReader = new DatabaseReader<>(metadata, idType, () -> entityManager);
+        this.dbWriter = new DatabaseWriter<>(metadata, idType, () -> entityManager);
     }
 
     /**
@@ -223,41 +145,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      */
     @PostConstruct
     private void initIdPool() {
-        if (useIdPool) {
-            try {
-                IdPoolService idPoolService = applicationContext.getBean(IdPoolService.class);
-                idPoolService.registerPool(sequenceName, allocationSize);
-
-                // Redis에 기존 Pool이 있으면 시퀀스 리셋 없이 Redis에서 복원
-                // Redis에 없을 때만 시퀀스를 현재 최대 ID로 리셋 후 새로 할당
-                if (!idPoolService.isRedisPoolIntact()) {
-                    try {
-                        String entityName = getEntityClass().getSimpleName();
-                        String idFieldName = entityIdField.getName();
-                        Object result = entityManager.createQuery(
-                                "SELECT MAX(e." + idFieldName + ") FROM " + entityName + " e")
-                                .getSingleResult();
-                        Long maxId = (result != null) ? ((Number) result).longValue() : null;
-                        if (maxId != null) {
-                            idPoolService.resetSequenceToMaxId(sequenceName, maxId);
-                            log.info("[AutoCacheRepository] Sequence '{}' reset to current max ID={} for entity={}",
-                                    sequenceName, maxId, entityName);
-                        }
-                    } catch (Exception e) {
-                        log.warn("[AutoCacheRepository] 시퀀스 리셋 실패 (무시하고 계속): {}", e.getMessage());
-                    }
-                } else {
-                    log.info("[AutoCacheRepository] Redis pool exists for '{}', skipping sequence reset",
-                            sequenceName);
-                }
-
-                idPoolService.initializePool(sequenceName);
-                log.info("[AutoCacheRepository] ID Pool initialized: entity={}, sequence={}, allocationSize={}",
-                        getEntityClass().getSimpleName(), sequenceName, allocationSize);
-            } catch (Exception e) {
-                log.warn("[AutoCacheRepository] ID Pool 초기화 실패 (fallback to negative ID): {}", e.getMessage());
-            }
-        }
+        idGenerator.init();
     }
 
     // ==== CacheRepository 인터페이스 기본 CRUD 구현 ====
@@ -374,7 +262,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * 캐시에서 삭제된 영속 ID를 별도로 저장하여 동기화 시 안정적으로 DB에서 삭제합니다.
      */
     protected final String getDeletedSetKey() {
-        return cacheKeyPrefix + ":DELETED";
+        return deletedSet.getDeletedSetKey();
     }
 
     /**
@@ -382,27 +270,21 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * 임시 ID(음수)나 null은 추적하지 않습니다.
      */
     private void trackDeletedId(ID id) {
-        if (id == null)
-            return;
-        // 임시(음수) ID는 DB에 없으므로 추적 불필요
-        if (!useIdPool && id instanceof Number number && number.longValue() < 0L) {
-            return;
-        }
-        getCacheStore().addToSet(getDeletedSetKey(), String.valueOf(id));
+        deletedSet.trackDeletedId(id);
     }
 
     /**
      * 추적된 삭제 ID 목록을 반환합니다.
      */
     public Set<String> getDeletedIds() {
-        return getCacheStore().getSet(getDeletedSetKey());
+        return deletedSet.getDeletedIds();
     }
 
     /**
      * 추적된 삭제 ID 목록을 초기화합니다.
      */
     public void clearDeletedIds() {
-        getCacheStore().delete(getDeletedSetKey());
+        deletedSet.clearDeletedIds();
     }
 
     /**
@@ -410,63 +292,26 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * Undo/Redo로 엔티티가 복원될 때 호출하여, 동기화 시 잘못 삭제되는 것을 방지합니다.
      */
     public void removeFromDeletedSet(ID id) {
-        if (id == null)
-            return;
-        getCacheStore().removeFromSet(getDeletedSetKey(), String.valueOf(id));
+        deletedSet.removeFromDeletedSet(id);
     }
 
     /**
      * DELETED Set에서 특정 ID를 제거합니다 (타입 체크 없는 버전).
      */
-    @SuppressWarnings("unchecked")
     public void removeFromDeletedSetUnchecked(Object id) {
-        if (id == null)
-            return;
-        removeFromDeletedSet((ID) id);
+        deletedSet.removeFromDeletedSet(id);
     }
 
     private String getParentIndexField(Class<?> parentClass, Object parentId) {
-        return "P_IDX:" + parentClass.getSimpleName() + ":" + parentId;
+        return parentIndex.getParentIndexField(parentClass, parentId);
     }
 
     private void addIdToParentIndex(String hashKey, Class<?> parentClass, Object parentId, ID id) {
-        if (parentId == null || parentClass == null)
-            return;
-        String field = getParentIndexField(parentClass, parentId);
-        String idStr = String.valueOf(id);
-
-        synchronized (this) {
-            String existing = getCacheStore().hashGetString(hashKey, field);
-            if (existing == null || existing.isEmpty()) {
-                getCacheStore().hashSetString(hashKey, field, idStr);
-            } else {
-                Set<String> ids = new java.util.LinkedHashSet<>(Arrays.asList(existing.split(",")));
-                if (ids.add(idStr)) {
-                    getCacheStore().hashSetString(hashKey, field, String.join(",", ids));
-                }
-            }
-        }
+        parentIndex.addIdToParentIndex(hashKey, parentClass, parentId, id);
     }
 
     private void removeIdFromParentIndex(String hashKey, Class<?> parentClass, Object parentId, ID id) {
-        if (parentId == null || parentClass == null)
-            return;
-        String field = getParentIndexField(parentClass, parentId);
-        String idStr = String.valueOf(id);
-
-        synchronized (this) {
-            String existing = getCacheStore().hashGetString(hashKey, field);
-            if (existing != null && !existing.isEmpty()) {
-                Set<String> ids = new java.util.LinkedHashSet<>(Arrays.asList(existing.split(",")));
-                if (ids.remove(idStr)) {
-                    if (ids.isEmpty()) {
-                        getCacheStore().hashDelete(hashKey, field);
-                    } else {
-                        getCacheStore().hashSetString(hashKey, field, String.join(",", ids));
-                    }
-                }
-            }
-        }
+        parentIndex.removeIdFromParentIndex(hashKey, parentClass, parentId, id);
     }
 
     /**
@@ -635,60 +480,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * @param source 데이터를 가져올 소스 Entity (null이 아닌 값만 복사)
      */
     public void mergeEntityFields(T target, T source) {
-        if (target == null || source == null) {
-            throw new IllegalArgumentException("target과 source는 null일 수 없습니다.");
-        }
-
-        try {
-            Class<?> entityClass = target.getClass();
-
-            // 모든 필드를 순회하며 업데이트
-            for (Field field : entityClass.getDeclaredFields()) {
-                field.setAccessible(true);
-
-                // ID 필드는 건너뛰기
-                if (field.isAnnotationPresent(jakarta.persistence.Id.class)) {
-                    continue;
-                }
-
-                // @ManyToOne, @OneToMany 등 관계 필드는 건너뛰기 (선택적)
-                if (field.isAnnotationPresent(jakarta.persistence.ManyToOne.class) ||
-                        field.isAnnotationPresent(jakarta.persistence.OneToMany.class) ||
-                        field.isAnnotationPresent(jakarta.persistence.OneToOne.class) ||
-                        field.isAnnotationPresent(jakarta.persistence.ManyToMany.class)) {
-
-                    // 관계 필드도 null이 아니면 업데이트
-                    Object sourceValue = field.get(source);
-                    if (sourceValue != null) {
-                        // Collection 타입인 경우 (OneToMany, ManyToMany) 기존 컬렉션을 유지하며 내용만 업데이트
-                        if (sourceValue instanceof Collection<?> sourceCollection) {
-                            Object targetValue = field.get(target);
-                            if (targetValue instanceof Collection targetCollection
-                                    && targetCollection != sourceCollection) {
-                                try {
-                                    targetCollection.clear();
-                                    ((Collection) targetCollection).addAll(sourceCollection);
-                                } catch (Exception e) {
-                                    // 읽기 전용 컬렉션이거나 수정 불가한 경우 교체 시도
-                                    field.set(target, sourceValue);
-                                }
-                                continue;
-                            }
-                        }
-                        field.set(target, sourceValue);
-                    }
-                    continue;
-                }
-
-                // source의 값이 null이 아니면 target에 설정
-                Object sourceValue = field.get(source);
-                if (sourceValue != null) {
-                    field.set(target, sourceValue);
-                }
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Entity 필드 병합 실패", e);
-        }
+        converter.mergeEntityFields(target, source);
     }
 
     /**
@@ -696,285 +488,39 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * 새 DTO의 null이 아닌 값들로 기존 DTO를 업데이트 (ID 제외)
      */
     private DTO mergeDto(DTO existingDto, DTO newDto) {
-        try {
-            for (Field field : dtoFields) {
-                if (field.equals(idField)) {
-                    continue;
-                }
-
-                Object newValue = field.get(newDto);
-                if (newValue != null) {
-                    field.set(existingDto, newValue);
-                }
-            }
-
-            return existingDto;
-        } catch (Exception e) {
-            throw new RuntimeException("DTO 병합 실패: " + newDto, e);
-        }
+        return converter.mergeDto(existingDto, newDto);
     }
 
-    /**
-     * ID 생성: Pool 모드면 DB 시퀀스에서 미리 할당받은 양수 ID 반환,
-     * 아니면 기존 CacheStore DECR 방식으로 음수 임시 ID 반환.
-     */
     private Long generateId() {
-        if (useIdPool) {
-            try {
-                IdPoolService idPoolService = applicationContext.getBean(IdPoolService.class);
-                return idPoolService.nextId(sequenceName);
-            } catch (Exception e) {
-                log.warn("[AutoCacheRepository] ID Pool에서 ID 할당 실패, 음수 ID fallback: {}", e.getMessage());
-            }
-        }
-        // fallback: 기존 음수 ID 방식
-        String counterKey = "temporary:" + cacheKeyPrefix + ":counter";
-        Long counter = getCacheStore().decrement(counterKey);
-        return counter;
+        return idGenerator.generateId();
     }
 
     /**
      * DTO의 ID 필드를 업데이트 (Record는 새 인스턴스 생성)
      */
-    @SuppressWarnings("unchecked")
     private DTO updateDtoWithId(DTO dto, ID newId) {
-        try {
-            idField.set(dto, newId);
-            return dto;
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("DTO ID 업데이트 실패: " + dto, e);
-        }
+        return converter.updateDtoWithId(dto, newId);
     }
 
-    @SuppressWarnings("unchecked")
     protected final T convertToEntity(DTO dto) {
-        try {
-            // 필요한 Repository들을 자동으로 주입해서 Entity 변환
-            Object[] parameters = buildEntityConverterParameters(dto);
-            return (T) entityConverterMethod.invoke(dto, parameters);
-        } catch (Exception e) {
-            throw new RuntimeException("Entity 변환에 실패했습니다: " + dto, e);
-        }
+        return converter.convertToEntity(dto);
     }
 
-    @SuppressWarnings("unchecked")
     protected final DTO convertToDto(T entity) {
-        if (entity == null) {
-            return null;
-        }
-
-        try {
-            Method fromEntityMethod = dtoClass.getMethod("fromEntity", getEntityClass());
-            return (DTO) fromEntityMethod.invoke(null, entity);
-        } catch (NoSuchMethodException e) {
-            throw new IllegalStateException(dtoClass.getSimpleName() + "에 fromEntity 메서드가 필요합니다.", e);
-        } catch (Exception e) {
-            throw new RuntimeException("Entity를 DTO로 변환하는 데 실패했습니다.", e);
-        }
+        return converter.convertToDto(entity);
     }
 
     @SuppressWarnings("unchecked")
     private List<T> loadEntitiesByParentId(Object parentId) {
-        return loadEntitiesByParentId(parentId, null);
+        return dbReader.loadEntitiesByParentId(parentId);
     }
 
     private List<T> loadEntitiesByParentId(Object parentId, Class<?> parentClass) {
-
-        if (entityManager == null) {
-            return Collections.emptyList();
-        }
-
-        // 부모 필드가 있으면 Criteria로 조회
-        if (!parentIdFields.isEmpty()) {
-            try {
-                return loadEntitiesByCriteria(parentId, parentClass);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        } else {
-            // 부모 필드가 없으면 (루트 엔티티) 전체 조회
-            try {
-                return loadAllEntitiesByCriteria();
-            } catch (Exception e) {
-                System.err.println("[SharedSync] Criteria API findAll 실패: " + e.getMessage());
-            }
-        }
-
-        return Collections.emptyList();
+        return dbReader.loadEntitiesByParentId(parentId, parentClass);
     }
 
-    /**
-     * JPA Criteria API를 사용하여 parentId로 엔티티 조회
-     * Repository에 메서드가 없어도 동작합니다!
-     */
-    @SuppressWarnings("unchecked")
-    private List<T> loadEntitiesByCriteria(Object parentId) {
-        return loadEntitiesByCriteria(parentId, null);
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<T> loadEntitiesByCriteria(Object parentId, Class<?> targetParentClass) {
-        Class<T> entityClass = getEntityClass();
-
-        if (parentEntityClassMap.isEmpty() || entityManager == null) {
-            return loadAllEntitiesByCriteria();
-        }
-
-        CriteriaBuilder cb = entityManager.getCriteriaBuilder();
-        CriteriaQuery<T> query = (CriteriaQuery<T>) cb.createQuery(entityClass);
-        Root<T> root = (Root<T>) query.from(entityClass);
-
-        List<jakarta.persistence.criteria.Predicate> predicates = new ArrayList<>();
-        for (Class<?> parentClass : parentEntityClassMap.values()) {
-            // 특정 부모 클래스가 지정된 경우 해당 클래스만 처리
-            if (targetParentClass != null && !parentClass.equals(targetParentClass)) {
-                continue;
-            }
-
-            // Entity 클래스 계층에서 해당 부모 타입을 가진 필드 찾기
-            for (Field field : getAllFieldsInHierarchy(entityClass)) {
-                if (field.getType().isAssignableFrom(parentClass)) {
-                    try {
-                        // 부모 엔티티의 @Id 필드 정보를 동적으로 가져옴
-                        Field pIdField = locateEntityIdField(parentClass);
-                        if (pIdField == null)
-                            continue;
-
-                        String idFieldName = pIdField.getName();
-                        Class<?> pIdType = pIdField.getType();
-
-                        // parentId(보통 String)를 부모 ID의 실제 타입(UUID, Integer 등)으로 변환
-                        Object normalizedParentId = convertIdToType(pIdType, parentId);
-
-                        jakarta.persistence.criteria.Path<?> parentPath = root.get(field.getName());
-                        jakarta.persistence.criteria.Path<?> parentIdPath = parentPath.get(idFieldName);
-                        predicates.add(cb.equal(parentIdPath, normalizedParentId));
-                    } catch (Exception e) {
-                        // JPA 필드가 아니거나 id 필드가 없는 경우 무시하고 로그 출력
-                        System.err.println("[SharedSync][WARN] Failed to build predicate for field " + field.getName()
-                                + ": " + e.getMessage());
-                    }
-                }
-            }
-        }
-
-        if (predicates.isEmpty()) {
-            // 부모 정보가 있는 엔티티임에도 조건을 찾지 못한 경우, 전체 조회를 하지 않고 빈 목록 반환 (보안 및 격리)
-            return Collections.emptyList();
-        }
-
-        if (predicates.size() == 1) {
-            query.where(predicates.get(0));
-        } else {
-            query.where(cb.or(predicates.toArray(new jakarta.persistence.criteria.Predicate[0])));
-        }
-
-        return entityManager.createQuery(query).getResultList();
-    }
-
-    /**
-     * JPA Criteria API를 사용하여 모든 엔티티 조회 (루트 엔티티용)
-     */
-    @SuppressWarnings("unchecked")
-    private List<T> loadAllEntitiesByCriteria() {
-        Class<T> entityClass = getEntityClass();
-
-        CriteriaBuilder cb = entityManager.getCriteriaBuilder();
-        CriteriaQuery<T> query = (CriteriaQuery<T>) cb.createQuery(entityClass);
-        query.from(entityClass);
-
-        return entityManager.createQuery(query).getResultList();
-    }
-
-    /**
-     * JPA Criteria API를 사용하여 ID로 단일 엔티티 조회
-     */
-    @SuppressWarnings("unchecked")
     private T loadEntityByIdCriteria(ID id) {
-        Class<T> entityClass = getEntityClass();
-
-        // Try to load entity with necessary relations eager-fetched (left join fetch)
-        // based on DTO cache fields like `cacheUserId` -> relation `user`.
-        if (entityManager == null) {
-            return null;
-        }
-
-        try {
-            List<String> relationsToFetch = new ArrayList<>();
-
-            for (Field dtoField : dtoFields) {
-                String dtoFieldName = dtoField.getName();
-                if (dtoFieldName == null)
-                    continue;
-                if (dtoFieldName.endsWith("Id")) {
-                    String entitySimple = dtoFieldName.substring(0, dtoFieldName.length() - 2); // e.g. "User"
-                    if (entitySimple.isEmpty())
-                        continue;
-                    String candidate = Character.toLowerCase(entitySimple.charAt(0)) + entitySimple.substring(1);
-
-                    for (Field f : getAllFieldsInHierarchy(entityClass)) {
-                        String relationName = null;
-
-                        // 1) 필드명 또는 필드 타입으로 매칭
-                        if (f.getName().equals(candidate) || f.getType().getSimpleName().equals(entitySimple)) {
-                            relationName = f.getName();
-                        }
-
-                        // 2) @JoinColumn(name = "...")가 있으면 컬럼명으로 매칭
-                        try {
-                            jakarta.persistence.JoinColumn jc = f.getAnnotation(jakarta.persistence.JoinColumn.class);
-                            if (jc != null) {
-                                String jcName = jc.name();
-                                if (jcName != null && !jcName.isBlank()) {
-                                    // DTO 필드명(예: userId)에서 추출한 candidate(user)와
-                                    // JoinColumn 이름(user_id)이 유사한지 확인
-                                    if (jcName.toLowerCase().contains(candidate.toLowerCase())) {
-                                        relationName = f.getName();
-                                    }
-                                }
-                            }
-                        } catch (Exception ignored) {
-                            // ignore reflection issues
-                        }
-
-                        if (relationName != null) {
-                            if (!relationsToFetch.contains(relationName))
-                                relationsToFetch.add(relationName);
-                            break;
-                        }
-                    }
-                }
-            }
-
-            CriteriaBuilder cb = entityManager.getCriteriaBuilder();
-            CriteriaQuery<T> query = (CriteriaQuery<T>) cb.createQuery(entityClass);
-            Root<T> root = (Root<T>) query.from(entityClass);
-
-            // add fetch joins
-            java.util.Set<String> uniq = new java.util.LinkedHashSet<>(relationsToFetch);
-            for (String rel : uniq) {
-                try {
-                    root.fetch(rel, jakarta.persistence.criteria.JoinType.LEFT);
-                } catch (IllegalArgumentException ignored) {
-                    // ignore invalid relation names
-                }
-            }
-
-            query.select(root).where(cb.equal(root.get(entityIdField.getName()), id));
-
-            try {
-                return entityManager.createQuery(query).getSingleResult();
-            } catch (jakarta.persistence.NoResultException nre) {
-                return null;
-            }
-        } catch (Exception e) {
-            // Fallback to simple find() if anything goes wrong
-            try {
-                return entityManager.find(entityClass, id);
-            } catch (Exception ex) {
-                return null;
-            }
-        }
+        return dbReader.loadEntityByIdCriteria(id);
     }
 
     @Override
@@ -1032,60 +578,11 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     private ID changeType(Object id) {
-        if (id == null) {
-            return null;
-        }
-        if (idClass.isInstance(id)) {
-            return (ID) id;
-        }
-        if (idClass.getSimpleName().equals("String")) {
-            return (ID) id.toString();
-        }
-        if (idClass.getSimpleName().equals("Integer")) {
-            return (ID) Integer.valueOf(id.toString());
-        }
-        if (idClass.getSimpleName().equals("Long")) {
-            return (ID) Long.valueOf(id.toString());
-        }
-        if (idClass.getSimpleName().equals("UUID")) {
-            return (ID) java.util.UUID.fromString(id.toString());
-        }
-        return null;
+        return idType.changeType(id);
     }
 
-    /**
-     * Convert arbitrary id value to the requested target type (entity id field
-     * type).
-     * Supports String, Integer/int, Long/long, Short, Byte, UUID.
-     */
     private Object convertIdToType(Class<?> targetType, Object idValue) {
-        if (idValue == null)
-            return null;
-        if (targetType == null)
-            return idValue;
-
-        // already correct type
-        if (targetType.isInstance(idValue))
-            return idValue;
-
-        String s = idValue.toString();
-        try {
-            if (targetType == String.class)
-                return s;
-            if (targetType == Integer.class || targetType == int.class)
-                return Integer.valueOf(s);
-            if (targetType == Long.class || targetType == long.class)
-                return Long.valueOf(s);
-            if (targetType == Short.class || targetType == short.class)
-                return Short.valueOf(s);
-            if (targetType == Byte.class || targetType == byte.class)
-                return Byte.valueOf(s);
-            if (targetType == java.util.UUID.class)
-                return java.util.UUID.fromString(s);
-        } catch (Exception e) {
-            // fall through to return original value below
-        }
-        return idValue;
+        return idType.convertIdToType(targetType, idValue);
     }
 
     @Override
@@ -1390,190 +887,16 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
                 .toList();
     }
 
-    private Object[] buildEntityConverterParameters(DTO dto) throws Exception {
-        Class<?>[] parameterTypes = entityConverterMethod.getParameterTypes();
-        Object[] params = new Object[parameterTypes.length];
-        Type[] genericParameterTypes = entityConverterMethod.getGenericParameterTypes();
-
-        for (int i = 0; i < parameterTypes.length; i++) {
-            Class<?> paramType = parameterTypes[i];
-            Type genericType = genericParameterTypes[i];
-
-            // Determine expected entity class for this converter parameter
-            Class<?> expectedEntityClass = null;
-            if (List.class.isAssignableFrom(paramType)) {
-                expectedEntityClass = getListElementType(genericType);
-            } else {
-                expectedEntityClass = paramType;
-            }
-
-            // If we have an expected entity class, use EntityManager to obtain references
-            if (List.class.isAssignableFrom(paramType)) {
-                Class<?> elementType = expectedEntityClass;
-                if (elementType != null) {
-                    List<?> idList = extractRelatedIdList(dto, elementType);
-                    if (idList != null && !idList.isEmpty()) {
-                        List<Object> entities = new ArrayList<>();
-                        for (Object id : idList) {
-                            try {
-                                Object normalizedId = changeType((ID) id);
-                                Object ref = entityManager.getReference(elementType, normalizedId);
-                                entities.add(ref);
-                            } catch (Exception e) {
-                                // skip missing/invalid ids
-                            }
-                        }
-                        params[i] = entities;
-                    } else {
-                        params[i] = new ArrayList<>();
-                    }
-                } else {
-                    params[i] = new ArrayList<>();
-                }
-            } else {
-                Object relatedId = extractRelatedId(dto, i);
-                if (relatedId == null) {
-                    params[i] = null;
-                } else {
-                    try {
-                        if (expectedEntityClass != null) {
-                            try {
-                                // Find id field type for the expected entity and convert accordingly
-                                Field relatedIdField = locateEntityIdField(expectedEntityClass);
-                                Class<?> relatedIdType = relatedIdField != null ? relatedIdField.getType() : null;
-                                Object normalized = convertIdToType(relatedIdType, relatedId);
-                                Object ref = entityManager.getReference(expectedEntityClass, normalized);
-                                params[i] = ref;
-                            } catch (Exception e) {
-                                params[i] = null;
-                            }
-                        } else {
-                            params[i] = null;
-                        }
-                    } catch (Exception e) {
-                        params[i] = null;
-                    }
-                }
-            }
-        }
-
-        return params;
-    }
-
-    /**
-     * 제네릭 타입에서 List의 요소 타입 추출
-     */
-    private Class<?> getListElementType(Type genericType) {
-        if (genericType instanceof ParameterizedType) {
-            ParameterizedType parameterizedType = (ParameterizedType) genericType;
-            Type[] typeArguments = parameterizedType.getActualTypeArguments();
-            if (typeArguments.length > 0 && typeArguments[0] instanceof Class) {
-                return (Class<?>) typeArguments[0];
-            }
-        }
-        return null;
-    }
-
-    /**
-     * DTO에서 관련 ID 리스트 추출 (List<Tag> 등을 위해)
-     */
-    @SuppressWarnings("unchecked")
-    private List<?> extractRelatedIdList(DTO dto, Class<?> elementType) {
-        String tableName = getTableName(elementType);
-        for (Field field : getAllFieldsInHierarchy(dtoClass)) {
-            TableName tableNameAnnotation = field.getAnnotation(TableName.class);
-            if (tableNameAnnotation != null && tableNameAnnotation.value().equalsIgnoreCase(tableName)) {
-                field.setAccessible(true);
-                try {
-                    Object value = field.get(dto);
-                    if (value instanceof List) {
-                        return (List<?>) value;
-                    }
-                } catch (IllegalAccessException e) {
-                    // 무시
-                }
-            }
-        }
-        return null;
-    }
-
-    private Object extractRelatedId(DTO dto, int parameterIndex) {
-        try {
-            // Determine the expected entity class from the converter method parameter
-            Class<?>[] paramTypes = entityConverterMethod.getParameterTypes();
-            Type[] genericParamTypes = entityConverterMethod.getGenericParameterTypes();
-            Class<?> entityClass = null;
-            if (parameterIndex < paramTypes.length) {
-                Class<?> paramType = paramTypes[parameterIndex];
-                if (List.class.isAssignableFrom(paramType)) {
-                    entityClass = getListElementType(genericParamTypes[parameterIndex]);
-                } else {
-                    entityClass = paramType;
-                }
-            }
-
-            if (entityClass == null) {
-                return null;
-            }
-
-            // 0순위: @TableName 어노테이션 매칭 (테이블 이름 기반)
-            String tableName = getTableName(entityClass);
-            for (Field field : getAllFieldsInHierarchy(dtoClass)) {
-                TableName tableNameAnnotation = field.getAnnotation(TableName.class);
-                if (tableNameAnnotation != null && tableNameAnnotation.value().equalsIgnoreCase(tableName)) {
-                    field.setAccessible(true);
-                    Object val = field.get(dto);
-                    if (val != null)
-                        return val;
-                }
-            }
-
-            // 1순위: DTO에서 @ParentId(entityClass)가 붙은 필드 찾기
-            for (Field field : getAllFieldsInHierarchy(dtoClass)) {
-                field.setAccessible(true);
-
-                // @ParentId 어노테이션 확인 - 엔티티 클래스와 일치하는지
-                ParentId parentIdAnnotation = field.getAnnotation(ParentId.class);
-                if (parentIdAnnotation != null && parentIdAnnotation.value() == entityClass) {
-                    Object idValue = field.get(dto);
-                    if (idValue != null) {
-                        return idValue;
-                    }
-                }
-            }
-
-            return null;
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("관련 ID 추출 실패: parameterIndex=" + parameterIndex, e);
-        }
-    }
 
     /**
      * 클래스 계층에서 모든 필드 가져오기
      */
     private List<Field> getAllFieldsInHierarchy(Class<?> clazz) {
-        List<Field> fields = new ArrayList<>();
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            for (Field field : current.getDeclaredFields()) {
-                fields.add(field);
-            }
-            current = current.getSuperclass();
-        }
-        return fields;
+        return ReflectionSupport.getAllFieldsInHierarchy(clazz);
     }
 
-    /**
-     * 엔티티 클래스에서 테이블 이름을 가져옵니다.
-     * 
-     * @Table 어노테이션이 있으면 해당 이름을 사용하고, 없으면 클래스 이름을 사용합니다.
-     */
     private String getTableName(Class<?> entityClass) {
-        jakarta.persistence.Table table = entityClass.getAnnotation(jakarta.persistence.Table.class);
-        if (table != null && !table.name().isEmpty()) {
-            return table.name();
-        }
-        return entityClass.getSimpleName();
+        return ReflectionSupport.getTableName(entityClass);
     }
 
     @Override
@@ -1615,17 +938,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     private Field findFieldInHierarchy(Class<?> clazz, String fieldName) {
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            try {
-                Field field = current.getDeclaredField(fieldName);
-                field.setAccessible(true);
-                return field;
-            } catch (NoSuchFieldException ignored) {
-                current = current.getSuperclass();
-            }
-        }
-        return null;
+        return ReflectionSupport.findFieldInHierarchy(clazz, fieldName);
     }
 
     @SuppressWarnings("unchecked")
@@ -1636,39 +949,6 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
             return (Class<T>) typeArgs[0]; // Entity는 첫 번째 타입 파라미터
         }
         throw new IllegalStateException("Entity 클래스를 추출할 수 없습니다.");
-    }
-
-    private Field findFieldWithAnnotation(Class<?> clazz,
-            Class<? extends java.lang.annotation.Annotation> annotationClass) {
-        for (Field field : clazz.getDeclaredFields()) {
-            if (field.isAnnotationPresent(annotationClass)) {
-                return field;
-            }
-        }
-        return null;
-    }
-
-    private Method findMethodWithAnnotation(Class<?> clazz,
-            Class<? extends java.lang.annotation.Annotation> annotationClass) {
-        for (Method method : clazz.getDeclaredMethods()) {
-            if (method.isAnnotationPresent(annotationClass)) {
-                return method;
-            }
-        }
-        return null;
-    }
-
-    private Field locateEntityIdField(Class<?> entityClass) {
-        Class<?> current = entityClass;
-        while (current != null && current != Object.class) {
-            for (Field field : current.getDeclaredFields()) {
-                if (field.isAnnotationPresent(jakarta.persistence.Id.class)) {
-                    return field;
-                }
-            }
-            current = current.getSuperclass();
-        }
-        return null;
     }
 
     public DTO findDtoById(ID id) {
@@ -1982,14 +1262,6 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     // ==== 동기화 메소드 ====
-
-    public static void syncHierarchyToDatabaseByRootId(int rootId) {
-        //
-    }
-
-    public static void syncHierarchyToDatabaseByRootId(String rootId) {
-
-    }
 
     public DTO syncToDatabaseByDto(DTO dto) {
         if (dto == null) {
@@ -2317,271 +1589,19 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      */
     @SuppressWarnings("unchecked")
     private T insertWithOverridingSystemValue(T entity) {
-        Class<?> entityClass = getEntityClass();
-        String tableName = getTableName(entityClass);
-
-        List<String> columnNames = new ArrayList<>();
-        List<Object> columnValues = new ArrayList<>();
-
-        // 엔티티의 모든 필드를 순회하며 컬럼 매핑 정보 추출
-        for (Field field : getAllPersistableFields(entityClass)) {
-            field.setAccessible(true);
-
-            // @Transient 및 static/final 필드 제외
-            if (field.isAnnotationPresent(jakarta.persistence.Transient.class)
-                    || Modifier.isStatic(field.getModifiers())
-                    || Modifier.isFinal(field.getModifiers())) {
-                continue;
-            }
-
-            // @OneToMany 등 컬렉션 관계 제외
-            if (field.isAnnotationPresent(jakarta.persistence.OneToMany.class)) {
-                continue;
-            }
-
-            try {
-                Object value = field.get(entity);
-
-                // @ManyToOne 관계: 연관 엔티티에서 FK ID 추출
-                if (field.isAnnotationPresent(jakarta.persistence.ManyToOne.class)) {
-                    jakarta.persistence.JoinColumn joinColumn = field
-                            .getAnnotation(jakarta.persistence.JoinColumn.class);
-                    if (joinColumn == null) {
-                        // @JoinColumn이 없으면 건너뜀 (JPA 기본 매핑 사용 시)
-                        continue;
-                    }
-
-                    boolean isNullable = joinColumn.nullable();
-
-                    if (value == null) {
-                        if (!isNullable) {
-                            log.warn("[AutoCacheRepository] Required FK is null for {}.{}, skipping INSERT",
-                                    entityClass.getSimpleName(), field.getName());
-                            return entity;
-                        }
-                        // nullable FK가 null이면 컬럼 포함하지 않음
-                        continue;
-                    }
-
-                    // 연관 엔티티에서 FK 값 추출 (Hibernate 프록시 지원)
-                    Object fkValue = extractIdFromRelatedEntity(value);
-                    if (fkValue == null) {
-                        if (!isNullable) {
-                            log.warn(
-                                    "[AutoCacheRepository] FK value is null for {}.{} (entity exists but ID is null), skipping INSERT",
-                                    entityClass.getSimpleName(), field.getName());
-                            return entity;
-                        }
-                        continue;
-                    }
-
-                    columnNames.add(joinColumn.name());
-                    columnValues.add(fkValue);
-                    continue;
-                }
-
-                // 일반 컬럼
-                String columnName = getColumnName(field);
-                if (columnName != null && value != null) {
-                    columnNames.add(columnName);
-                    columnValues.add(value);
-                }
-            } catch (IllegalAccessException e) {
-                log.warn("[AutoCacheRepository] Failed to access field {}: {}",
-                        field.getName(), e.getMessage());
-            }
-        }
-
-        if (columnNames.isEmpty()) {
-            log.error("[AutoCacheRepository] No columns to insert for entity: {}", entityClass.getSimpleName());
-            return entity;
-        }
-
-        // INSERT SQL 생성: OVERRIDING SYSTEM VALUE
-        StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO ").append(tableName).append(" (");
-        sql.append(String.join(", ", columnNames));
-        sql.append(") OVERRIDING SYSTEM VALUE VALUES (");
-        sql.append(columnNames.stream().map(c -> "?").collect(Collectors.joining(", ")));
-        sql.append(")");
-
-        try {
-            jakarta.persistence.Query query = entityManager.createNativeQuery(sql.toString());
-            for (int i = 0; i < columnValues.size(); i++) {
-                query.setParameter(i + 1, columnValues.get(i));
-            }
-            query.executeUpdate();
-            log.info("[AutoCacheRepository] Inserted entity with Pool ID: table={}, id={}",
-                    tableName, extractEntityId(entity));
-        } catch (Exception e) {
-            log.error("[AutoCacheRepository] Native INSERT failed for {}: {}",
-                    entityClass.getSimpleName(), e.getMessage());
-            // Native INSERT 실패 시 fallback: 기존 persist 방식 시도
-            // 트랜잭션이 깨진 상태이므로, 현재 엔티티를 detach 후 새 persist 시도는 불가능.
-            // DB에 저장되지 않았지만 캐시에는 유지되므로, 다음 주기적 동기화에서 재시도됩니다.
-            log.warn("[AutoCacheRepository] Entity will be retried on next periodic sync. id={}",
-                    extractEntityId(entity));
-        }
-
-        return entity;
+        return dbWriter.insertWithOverridingSystemValue(entity);
     }
 
-    /**
-     * 엔티티 클래스(상속 포함)의 모든 영속 가능한 필드를 반환합니다.
-     */
-    private List<Field> getAllPersistableFields(Class<?> clazz) {
-        List<Field> fields = new ArrayList<>();
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            for (Field field : current.getDeclaredFields()) {
-                fields.add(field);
-            }
-            current = current.getSuperclass();
-        }
-        return fields;
-    }
-
-    /**
-     * 연관 엔티티에서 @Id 필드의 값을 추출합니다.
-     * Hibernate 프록시 객체도 지원합니다.
-     */
     private Object extractIdFromRelatedEntity(Object relatedEntity) {
-        if (relatedEntity == null)
-            return null;
-
-        // Hibernate 프록시인 경우 실제 클래스 가져오기
-        Class<?> clazz = relatedEntity.getClass();
-        try {
-            // org.hibernate.proxy.HibernateProxy 체크
-            if (relatedEntity instanceof org.hibernate.proxy.HibernateProxy proxy) {
-                // LazyInitializer에서 identifier 직접 추출
-                Object identifier = proxy.getHibernateLazyInitializer().getIdentifier();
-                if (identifier != null) {
-                    return identifier;
-                }
-                // 실제 엔티티 클래스로 전환
-                clazz = proxy.getHibernateLazyInitializer().getPersistentClass();
-            }
-        } catch (Exception e) {
-            // Hibernate 프록시가 아닌 경우 무시
-        }
-
-        // @Id 필드 탐색 (상속 계층 포함)
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            for (Field field : current.getDeclaredFields()) {
-                if (field.isAnnotationPresent(jakarta.persistence.Id.class)
-                        || field.isAnnotationPresent(jakarta.persistence.EmbeddedId.class)) {
-                    field.setAccessible(true);
-                    try {
-                        return field.get(relatedEntity);
-                    } catch (IllegalAccessException e) {
-                        // Getter 메서드로 시도
-                        try {
-                            String getterName = "get" + Character.toUpperCase(field.getName().charAt(0))
-                                    + field.getName().substring(1);
-                            java.lang.reflect.Method getter = clazz.getMethod(getterName);
-                            return getter.invoke(relatedEntity);
-                        } catch (Exception ex) {
-                            log.warn("[AutoCacheRepository] Cannot access @Id field '{}' in {}: {}",
-                                    field.getName(), clazz.getSimpleName(), e.getMessage());
-                        }
-                    }
-                }
-            }
-            current = current.getSuperclass();
-        }
-
-        log.warn("[AutoCacheRepository] No @Id field found in {}", clazz.getSimpleName());
-        return null;
+        return dbWriter.extractIdFromRelatedEntity(relatedEntity);
     }
 
-    /**
-     * 필드의 DB 컬럼 이름을 반환합니다.
-     * 
-     * @Column 어노테이션이 있으면 그 이름을, 없으면 camelCase → snake_case 변환합니다.
-     */
-    private String getColumnName(Field field) {
-        jakarta.persistence.Column column = field.getAnnotation(jakarta.persistence.Column.class);
-        if (column != null && !column.name().isEmpty()) {
-            return column.name();
-        }
-        // @Id 필드: JPA 기본 매핑 (camelCase → snake_case)
-        if (field.isAnnotationPresent(jakarta.persistence.Id.class)) {
-            jakarta.persistence.Column idColumn = field.getAnnotation(jakarta.persistence.Column.class);
-            if (idColumn != null && !idColumn.name().isEmpty()) {
-                return idColumn.name();
-            }
-        }
-        // camelCase → snake_case 변환
-        return camelToSnake(field.getName());
-    }
-
-    /**
-     * camelCase를 snake_case로 변환합니다.
-     */
-    private String camelToSnake(String camelCase) {
-        StringBuilder result = new StringBuilder();
-        for (int i = 0; i < camelCase.length(); i++) {
-            char c = camelCase.charAt(i);
-            if (Character.isUpperCase(c)) {
-                if (i > 0) {
-                    result.append('_');
-                }
-                result.append(Character.toLowerCase(c));
-            } else {
-                result.append(c);
-            }
-        }
-        return result.toString();
-    }
-
-    /**
-     * EntityManager를 사용하여 엔티티 저장 (persist 또는 merge)
-     */
     private T saveEntity(T entity) {
-        ID id = extractEntityId(entity);
-        if (id == null) {
-            // 새 엔티티 - persist
-            entityManager.persist(entity);
-            return entity;
-        } else {
-            // 기존 엔티티 - merge
-            try {
-                // @IgnoreShared 필드가 있다면 DB의 기존 값을 유지하도록 병합 전 복사
-                if (!ignoredEntityFields.isEmpty()) {
-                    T existing = entityManager.find(getEntityClass(), id);
-                    if (existing != null) {
-                        for (Field f : ignoredEntityFields) {
-                            try {
-                                Object val = f.get(existing);
-                                f.set(entity, val);
-                            } catch (IllegalAccessException e) {
-                                // ignore
-                            }
-                        }
-                    }
-                }
-                return entityManager.merge(entity);
-            } catch (jakarta.persistence.OptimisticLockException | org.hibernate.StaleObjectStateException e) {
-                // 이미 다른 트랜잭션에 의해 수정/삭제된 경우 무시
-                return entity;
-            }
-        }
+        return dbWriter.saveEntity(entity);
     }
 
-    /**
-     * EntityManager를 사용하여 여러 엔티티 삭제
-     */
     private void deleteAllEntities(List<T> entities) {
-        for (T entity : entities) {
-            try {
-                T managed = entityManager.contains(entity) ? entity : entityManager.merge(entity);
-                entityManager.remove(managed);
-            } catch (jakarta.persistence.OptimisticLockException | org.hibernate.StaleObjectStateException e) {
-                // 이미 삭제된 경우 무시
-            }
-        }
+        dbWriter.deleteAllEntities(entities);
     }
 
     public boolean isParentIdFieldPresent() {
@@ -2607,7 +1627,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     public boolean isPersistentId(Object id) {
-        return id != null && !isTemporaryId(id);
+        return idType.isPersistentId(id);
     }
 
     private Object getParentIdValue(DTO dto) {
@@ -2628,17 +1648,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     private boolean isTemporaryId(Object id) {
-        if (id == null) {
-            return false;
-        }
-        // Pool 모드에서는 항상 양수 ID → 임시 ID가 존재하지 않음
-        if (useIdPool) {
-            return false;
-        }
-        if (id instanceof Number number) {
-            return number.longValue() < 0L;
-        }
-        return false;
+        return idType.isTemporaryId(id);
     }
 
     @SuppressWarnings("unchecked")
@@ -2723,44 +1733,13 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
         }
     }
 
-    private DTO updateDtoParentId(DTO dto, Object newParentId) {
-        if (parentIdFields.isEmpty()) {
-            return dto;
-        }
-
-        try {
-            for (Field field : parentIdFields) {
-                if (field.getType().isInstance(newParentId)) {
-                    field.set(dto, newParentId);
-                }
-            }
-            return dto;
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("DTO 부모 ID 업데이트 실패", e);
-        }
-    }
-
     @SuppressWarnings("unchecked")
     private ID extractEntityId(T entity) {
-        if (entity == null) {
-            return null;
-        }
-        try {
-            return (ID) entityIdField.get(entity);
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("엔티티 ID 접근 실패", e);
-        }
+        return idType.extractEntityId(entity);
     }
 
     private void setEntityId(T entity, Object value) {
-        if (entity == null) {
-            return;
-        }
-        try {
-            entityIdField.set(entity, value);
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("엔티티 ID 설정 실패", e);
-        }
+        idType.setEntityId(entity, value);
     }
 
     @Override
@@ -2784,25 +1763,8 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     /**
      * 문자열 ID를 실제 ID 타입으로 변환
      */
-    @SuppressWarnings("unchecked")
     public ID convertStringToId(String idStr) {
-        if (idStr == null) {
-            return null;
-        }
-        try {
-            if (idClass.equals(String.class)) {
-                return (ID) idStr;
-            } else if (idClass.equals(java.util.UUID.class)) {
-                return (ID) java.util.UUID.fromString(idStr);
-            } else if (idClass.equals(Long.class) || idClass.equals(long.class)) {
-                return (ID) Long.valueOf(idStr);
-            } else if (idClass.equals(Integer.class) || idClass.equals(int.class)) {
-                return (ID) Integer.valueOf(idStr);
-            }
-        } catch (Exception e) {
-            throw new IllegalArgumentException("ID 변환 실패: " + idStr + " to " + idClass.getSimpleName());
-        }
-        throw new IllegalArgumentException("지원하지 않는 ID 타입입니다: " + idClass.getSimpleName());
+        return idType.convertStringToId(idStr);
     }
 
     /**

@@ -18,6 +18,7 @@ import org.springframework.context.ApplicationContext;
 
 import com.sharedsync.shared.annotation.Cache;
 import com.sharedsync.shared.annotation.CacheId;
+import com.sharedsync.shared.annotation.EntityConverter;
 import com.sharedsync.shared.dto.CacheDto;
 
 import jakarta.persistence.Id;
@@ -124,11 +125,11 @@ public class AutoCacheRepositoryResilienceTest {
             return id;
         }
 
-        @Override
         public void setId(UUID id) {
             this.id = id;
         }
 
+        @EntityConverter
         public TestEntity toEntity() {
             return new TestEntity();
         }

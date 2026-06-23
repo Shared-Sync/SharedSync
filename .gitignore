@@ -83,4 +83,7 @@ Thumbs.db
 
 
 *.properties
+# Re-include the Gradle wrapper properties (must come AFTER *.properties to win) —
+# without it JitPack/clean clones can't run ./gradlew and the build fails.
+!gradle/wrapper/gradle-wrapper.properties
 .gradle/buildOutputCleanup/outputFiles.bin

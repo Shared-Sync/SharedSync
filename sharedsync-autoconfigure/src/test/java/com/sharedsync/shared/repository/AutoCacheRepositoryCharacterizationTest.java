@@ -110,6 +110,38 @@ public class AutoCacheRepositoryCharacterizationTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void convertStringToId_bigInteger_beyondLongRange() throws Exception {
+        BigIntRepository repo = inject(new BigIntRepository());
+        String huge = "18446744073709551617"; // 2^64 + 1, > Long.MAX_VALUE
+        assertThat(repo.convertStringToId(huge)).isEqualTo(new java.math.BigInteger(huge));
+    }
+
+    // ===== 숫자 필드 비교 (matchesFieldValue) — BigInteger 절단 회귀 방지 =====
+
+    @Test
+    void matchesFieldValue_bigInteger_beyondLongRange_doesNotTruncate() throws Exception {
+        BigIntRepository repo = inject(new BigIntRepository());
+        BigIntDto dto = new BigIntDto();
+        dto.id = new java.math.BigInteger("18446744073709551617"); // 2^64 + 1
+
+        java.lang.reflect.Field idField = BigIntDto.class.getDeclaredField("id");
+        idField.setAccessible(true);
+        java.lang.reflect.Method matches = AutoCacheRepository.class.getDeclaredMethod(
+                "matchesFieldValue", CacheDto.class, java.lang.reflect.Field.class, Object.class);
+        matches.setAccessible(true);
+
+        // 절단되면 2^64+1 → 1 이 되어 Long 1 과 같다고 오판한다. 정밀 비교는 false 여야 한다.
+        assertThat((boolean) matches.invoke(repo, dto, idField, 1L)).isFalse();
+        // 동일한 큰 값은 정상적으로 일치
+        assertThat((boolean) matches.invoke(repo, dto, idField,
+                new java.math.BigInteger("18446744073709551617"))).isTrue();
+        // 교차 타입(Long ↔ BigInteger)의 동일 값 비교도 여전히 동작
+        BigIntDto small = new BigIntDto();
+        small.id = java.math.BigInteger.valueOf(5L);
+        assertThat((boolean) matches.invoke(repo, small, idField, 5L)).isTrue();
+    }
+
     // ===== 임시 ID 판별 (IdTypeConverter) =====
 
     @Test
@@ -213,6 +245,30 @@ public class AutoCacheRepositoryCharacterizationTest {
     }
 
     public static class LongRepository extends AutoCacheRepository<LongEntity, Long, LongDto> {
+    }
+
+    public static class BigIntEntity {
+        @Id
+        private java.math.BigInteger id;
+    }
+
+    @Cache(keyType = "big")
+    public static class BigIntDto extends CacheDto<java.math.BigInteger> {
+        @CacheId
+        private java.math.BigInteger id;
+
+        @Override
+        public java.math.BigInteger getId() {
+            return id;
+        }
+
+        @EntityConverter
+        public BigIntEntity toEntity() {
+            return new BigIntEntity();
+        }
+    }
+
+    public static class BigIntRepository extends AutoCacheRepository<BigIntEntity, java.math.BigInteger, BigIntDto> {
     }
 
     public static class IntEntity {

@@ -212,6 +212,8 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
                     generatedId = generateId().intValue();
                 } else if (idClass.getSimpleName().equals("Long")) {
                     generatedId = generateId();
+                } else if (idClass.getSimpleName().equals("BigInteger")) {
+                    generatedId = java.math.BigInteger.valueOf(generateId());
                 } else if (idClass.getSimpleName().equals("String")) {
                     generatedId = String.valueOf(generateId());
                 } else if (idClass.getSimpleName().equals("UUID")) {
@@ -393,6 +395,8 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
                 generatedId = java.util.UUID.randomUUID();
             } else if (idClass.getSimpleName().equals("Long")) {
                 generatedId = generateId();
+            } else if (idClass.getSimpleName().equals("BigInteger")) {
+                generatedId = java.math.BigInteger.valueOf(generateId());
             } else if (idClass.getSimpleName().equals("String")) {
                 generatedId = String.valueOf(generateId());
             } else if (idClass.getSimpleName().equals("Integer")) {
@@ -866,9 +870,12 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
                 return actualValue.toString().equals(expectedValue.toString());
             }
 
-            // 숫자 타입 비교: Long, Integer 등
+            // 숫자 타입 비교: Long, Integer, BigInteger 등.
+            // longValue() 비교는 Long 범위를 넘는 BigInteger 값을 잘라버려(2^64 modulo)
+            // 서로 다른 값이 같다고 오판할 수 있으므로 BigDecimal 로 정밀 비교한다.
             if (actualValue instanceof Number && expectedValue instanceof Number) {
-                return ((Number) actualValue).longValue() == ((Number) expectedValue).longValue();
+                return new java.math.BigDecimal(actualValue.toString())
+                        .compareTo(new java.math.BigDecimal(expectedValue.toString())) == 0;
             }
 
             // 타입이 다르면 문자열로 비교

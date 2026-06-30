@@ -873,9 +873,15 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
             // 숫자 타입 비교: Long, Integer, BigInteger 등.
             // longValue() 비교는 Long 범위를 넘는 BigInteger 값을 잘라버려(2^64 modulo)
             // 서로 다른 값이 같다고 오판할 수 있으므로 BigDecimal 로 정밀 비교한다.
+            // NaN/Infinity 등 BigDecimal 로 표현 불가한 부동소수 값은 문자열 동치로 폴백한다
+            // (BigDecimal(String) 이 NumberFormatException 을 던지므로).
             if (actualValue instanceof Number && expectedValue instanceof Number) {
-                return new java.math.BigDecimal(actualValue.toString())
-                        .compareTo(new java.math.BigDecimal(expectedValue.toString())) == 0;
+                try {
+                    return new java.math.BigDecimal(actualValue.toString())
+                            .compareTo(new java.math.BigDecimal(expectedValue.toString())) == 0;
+                } catch (NumberFormatException e) {
+                    return actualValue.toString().equals(expectedValue.toString());
+                }
             }
 
             // 타입이 다르면 문자열로 비교

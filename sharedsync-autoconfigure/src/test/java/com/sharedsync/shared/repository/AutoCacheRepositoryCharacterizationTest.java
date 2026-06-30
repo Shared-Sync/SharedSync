@@ -142,6 +142,23 @@ public class AutoCacheRepositoryCharacterizationTest {
         assertThat((boolean) matches.invoke(repo, small, idField, 5L)).isTrue();
     }
 
+    @Test
+    void matchesFieldValue_crossClassNonFiniteNumber_doesNotThrow() throws Exception {
+        // BigDecimal(String) 은 "NaN"/"Infinity" 에서 NumberFormatException 을 던지므로,
+        // 교차 타입 부동소수 필드 비교가 findByField 밖으로 예외를 전파하지 않아야 한다.
+        AmountRepository repo = inject(new AmountRepository());
+        AmountDto dto = new AmountDto();
+        dto.amount = Double.NaN; // Double 필드, 교차 타입(Integer 인자)와 비교
+
+        java.lang.reflect.Field amountField = AmountDto.class.getDeclaredField("amount");
+        amountField.setAccessible(true);
+        java.lang.reflect.Method matches = AutoCacheRepository.class.getDeclaredMethod(
+                "matchesFieldValue", CacheDto.class, java.lang.reflect.Field.class, Object.class);
+        matches.setAccessible(true);
+
+        assertThat((boolean) matches.invoke(repo, dto, amountField, 5)).isFalse();
+    }
+
     // ===== 임시 ID 판별 (IdTypeConverter) =====
 
     @Test
@@ -269,6 +286,32 @@ public class AutoCacheRepositoryCharacterizationTest {
     }
 
     public static class BigIntRepository extends AutoCacheRepository<BigIntEntity, java.math.BigInteger, BigIntDto> {
+    }
+
+    public static class AmountEntity {
+        @Id
+        private Long id;
+    }
+
+    @Cache(keyType = "amt")
+    public static class AmountDto extends CacheDto<Long> {
+        @CacheId
+        private Long id;
+
+        private Double amount;
+
+        @Override
+        public Long getId() {
+            return id;
+        }
+
+        @EntityConverter
+        public AmountEntity toEntity() {
+            return new AmountEntity();
+        }
+    }
+
+    public static class AmountRepository extends AutoCacheRepository<AmountEntity, Long, AmountDto> {
     }
 
     public static class IntEntity {

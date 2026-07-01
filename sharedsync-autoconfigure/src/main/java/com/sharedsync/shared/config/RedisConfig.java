@@ -14,6 +14,7 @@ import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
 import org.springframework.beans.factory.support.GenericBeanDefinition;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.ApplicationContext;
@@ -81,6 +82,7 @@ public class RedisConfig implements ApplicationContextAware {
     }
 
     @Bean(name = "sharedSyncRedisConnectionFactory")
+    @ConditionalOnMissingBean(name = "sharedSyncRedisConnectionFactory")
     public RedisConnectionFactory sharedSyncRedisConnectionFactory(
             @Value("${sharedsync.redis.host:${spring.data.redis.host:localhost}}") String host,
             @Value("${sharedsync.redis.replica-host:${spring.data.redis.replica-host:}}") String replicaHost,
@@ -135,6 +137,7 @@ public class RedisConfig implements ApplicationContextAware {
      * (Lettuce의 MasterReplica 설정은 Pub/Sub subscription을 지원하지 않음)
      */
     @Bean(name = "pubSubConnectionFactory")
+    @ConditionalOnMissingBean(name = "pubSubConnectionFactory")
     public RedisConnectionFactory pubSubConnectionFactory(
             @Value("${spring.data.redis.host:localhost}") String host,
             @Value("${spring.data.redis.port:6379}") String portStr,

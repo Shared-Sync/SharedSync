@@ -7,6 +7,11 @@ import java.util.List;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import org.hibernate.engine.spi.SessionFactoryImplementor;
+import org.hibernate.metamodel.mapping.AttributeMapping;
+import org.hibernate.metamodel.mapping.BasicValuedModelPart;
+import org.hibernate.persister.entity.EntityPersister;
+import org.hibernate.type.descriptor.converter.spi.BasicValueConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -160,7 +165,7 @@ public final class DatabaseWriter<T, ID, DTO extends CacheDto<ID>> {
                 String columnName = getColumnName(field);
                 if (columnName != null && value != null) {
                     columnNames.add(columnName);
-                    columnValues.add(value);
+                    columnValues.add(toRelationalValue(entityClass, field.getName(), value));
                 }
             } catch (IllegalAccessException e) {
                 log.warn("[AutoCacheRepository] Failed to access field {}: {}",
@@ -200,6 +205,40 @@ public final class DatabaseWriter<T, ID, DTO extends CacheDto<ID>> {
         }
 
         return entity;
+    }
+
+    /**
+     * Hibernate 메타모델에 등록된 컨버터(JPA {@code @Convert}, {@code @Enumerated} 등 종류를 가리지 않음)를
+     * 통해 도메인 값을 실제 DB 컬럼값으로 변환한다.
+     *
+     * <p>이 클래스가 리플렉션으로 읽은 엔티티 필드값을 그대로 native INSERT 파라미터에 바인딩하면, 값 변환이
+     * 필요한 컬럼(예: enum → DB 코드 문자열)에서 raw 값(예: enum ordinal)이 그대로 들어가 DB 제약을 위반한다.
+     * 어떤 변환 로직이 필요한지 이 클래스가 직접 알 필요 없이, Hibernate가 부트스트랩 시점에 이미 파악해둔
+     * 컨버터를 그대로 호출해 위임한다 — 새로운 변환 케이스가 추가돼도 이 메서드를 고칠 필요가 없다.</p>
+     *
+     * <p>컨버터가 없거나(변환이 필요 없는 일반 타입) 메타모델 조회에 실패하면 원본 값을 그대로 반환한다
+     * (리플렉션 직접 바인딩이던 기존 동작과 동일한 안전한 폴백).</p>
+     */
+    @SuppressWarnings("unchecked")
+    private Object toRelationalValue(Class<?> entityClass, String propertyName, Object domainValue) {
+        try {
+            SessionFactoryImplementor sessionFactory = entityManager.get().getEntityManagerFactory()
+                    .unwrap(SessionFactoryImplementor.class);
+            EntityPersister persister = sessionFactory.getMappingMetamodel().getEntityDescriptor(entityClass);
+            AttributeMapping attribute = persister.findAttributeMapping(propertyName);
+
+            if (attribute instanceof BasicValuedModelPart basicAttribute) {
+                BasicValueConverter converter = basicAttribute.getSingleJdbcMapping().getValueConverter();
+                if (converter != null) {
+                    return converter.toRelationalValue(domainValue);
+                }
+            }
+        } catch (Exception e) {
+            log.warn(
+                    "[AutoCacheRepository] Hibernate 메타모델 기반 값 변환 실패, raw 값을 그대로 사용합니다: entity={}, field={}, error={}",
+                    entityClass.getSimpleName(), propertyName, e.getMessage());
+        }
+        return domainValue;
     }
 
     /**

@@ -87,3 +87,9 @@ Thumbs.db
 # without it JitPack/clean clones can't run ./gradlew and the build fails.
 !gradle/wrapper/gradle-wrapper.properties
 .gradle/buildOutputCleanup/outputFiles.bin
+
+
+# ==========================
+# AI 작업용 로컬 문서 (커밋 안 함)
+# ==========================
+project_ai/

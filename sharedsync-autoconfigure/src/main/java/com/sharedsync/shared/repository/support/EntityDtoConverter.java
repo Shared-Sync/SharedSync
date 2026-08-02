@@ -84,6 +84,10 @@ public final class EntityDtoConverter<T, ID, DTO extends CacheDto<ID>> {
                     continue;
                 }
 
+                if (field.isAnnotationPresent(com.sharedsync.shared.annotation.IgnoreShared.class)) {
+                    continue;
+                }
+
                 if (field.isAnnotationPresent(jakarta.persistence.ManyToOne.class) ||
                         field.isAnnotationPresent(jakarta.persistence.OneToMany.class) ||
                         field.isAnnotationPresent(jakarta.persistence.OneToOne.class) ||

@@ -9,12 +9,13 @@ import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.messaging.simp.SimpAttributesContextHolder;
 import org.springframework.stereotype.Service;
 
+import com.sharedsync.shared.codec.SyncOutbound;
 import com.sharedsync.shared.dto.CacheDto;
 import com.sharedsync.shared.repository.AutoCacheRepository;
 import com.sharedsync.shared.sync.RedisSyncService;
+import com.sharedsync.shared.transport.SyncSessionContext;
 
 @Service
 public class HistoryService {
@@ -32,6 +33,9 @@ public class HistoryService {
     @Autowired
     private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
+    @Autowired
+    private SyncSessionContext sessionContext;
+
     private static final ThreadLocal<Boolean> SKIP_HISTORY = ThreadLocal.withInitial(() -> false);
 
     public static void setSkipHistory(boolean skip) {
@@ -43,11 +47,10 @@ public class HistoryService {
     }
 
     private String getCurrentSessionId() {
-        try {
-            return SimpAttributesContextHolder.currentAttributes().getSessionId();
-        } catch (Exception e) {
-            return null;
-        }
+        // transport 중립. STOMP 이면 SimpAttributes, raw WS 면 핸들러가 채운 ThreadLocal 에서 나온다.
+        // 여기서 null 이 나오면 undo 히스토리가 조용히 기록되지 않으므로 transport 구현이
+        // 반드시 세션을 채워야 한다.
+        return sessionContext.currentSessionId();
     }
 
     private static final String UNDO_PREFIX = "history:undo:";
@@ -115,11 +118,6 @@ public class HistoryService {
         if (redisSyncService == null || action.getEntityName() == null)
             return;
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("entity", action.getEntityName());
-        response.put("eventId", action.getEventId() == null ? "" : action.getEventId());
-        response.put("isUndoRedo", true);
-
         HistoryAction.Type type = action.getType();
         String broadcastAction;
         Object data;
@@ -144,11 +142,19 @@ public class HistoryService {
             };
         }
 
-        response.put("action", broadcastAction.toLowerCase());
-        String payloadKey = action.getEntityName().toLowerCase() + "s";
-        response.put(payloadKey, data);
+        // 예전에는 페이로드 키를 entityName.toLowerCase()+"s" 로 런타임에 만들어서 일반 편집
+        // 응답("timeTablePlaceBlockDtos")과 모양이 달랐다. 이제 SyncOutbound 로 통일한다 —
+        // 두 클라이언트 모두 두 키를 모두 받아들이는 폴백이 있어 기존 배포본과도 호환된다.
+        @SuppressWarnings("unchecked")
+        List<? extends CacheDto<?>> dtos = (List<? extends CacheDto<?>>) data;
 
-        redisSyncService.publish("/topic/" + rootId, response);
+        redisSyncService.publish("/topic/" + rootId, new SyncOutbound.Entities(
+                action.getEventId() == null ? "" : action.getEventId(),
+                broadcastAction.toLowerCase(),
+                action.getEntityName(),
+                true,
+                SyncOutbound.dtoFieldNameOf(action.getDtoClassName()),
+                dtos == null ? List.of() : dtos));
 
         if (action.getSubActions() != null) {
             for (HistoryAction subAction : action.getSubActions()) {

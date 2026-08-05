@@ -49,10 +49,15 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
 
-        registry.addEndpoint(props.getEndpoint())
+        var endpoint = registry.addEndpoint(props.getEndpoint())
                 .setAllowedOrigins(props.getAllowedOrigins().toArray(new String[0]))
-                .addInterceptors(handshakeInterceptors.toArray(new HandshakeInterceptor[0]))
-                .withSockJS();
+                .addInterceptors(handshakeInterceptors.toArray(new HandshakeInterceptor[0]));
+
+        // SockJS 는 텍스트 프레임만 보낼 수 있어 바이너리 codec 과 함께 쓸 수 없다.
+        // (조합 검증은 SharedSyncAutoConfig 가 기동 시점에 한다)
+        if (props.isSockjs()) {
+            endpoint.withSockJS();
+        }
     }
 
     @Override

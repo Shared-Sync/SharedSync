@@ -12,6 +12,11 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
+    // protobuf wire 코덱. annotation processor 가 컴파일 시점에 FileDescriptorProto 를 조립하고,
+    // 런타임 코덱이 DynamicMessage 로 인코딩한다. protoc 바이너리는 쓰지 않는다 —
+    // SharedSync 는 JitPack 에서 소스 빌드되므로 빌드 중 외부 바이너리 내려받기는 깨지기 쉽다.
+    api("com.google.protobuf:protobuf-java:4.31.1")
+
     // 통합 테스트(AutoCacheRepository DB 경로 검증)용 — 실제 Postgres 연결
     testRuntimeOnly("org.postgresql:postgresql")
 

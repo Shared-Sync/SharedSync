@@ -1,12 +1,13 @@
 package com.sharedsync.shared.sync;
 
-import static org.mockito.ArgumentMatchers.any;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.*;
 
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -15,18 +16,25 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.util.MimeTypeUtils;
 
+import com.sharedsync.shared.codec.SyncCodec;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
+import com.sharedsync.shared.transport.SyncTransport;
 
 @ExtendWith(MockitoExtension.class)
 class RedisSyncServiceTest {
+
+    private static final byte[] ENCODED = "{\"k\":\"v\"}".getBytes(StandardCharsets.UTF_8);
 
     @Mock
     private RedisTemplate<String, RedisSyncMessage> redisSyncTemplate;
 
     @Mock
-    private SimpMessagingTemplate messagingTemplate;
+    private SyncTransport transport;
+
+    @Mock
+    private SyncCodec codec;
 
     @Mock
     private SharedSyncWebSocketProperties props;
@@ -34,83 +42,108 @@ class RedisSyncServiceTest {
     @InjectMocks
     private RedisSyncService redisSyncService;
 
-    @Test
-    @DisplayName("publish: Redis 동기화가 비활성화 되어있으면 로컬 심플 메시징만 수행한다")
-    void publish_local() {
-        // given
+    @BeforeEach
+    void stubCodec() {
+        lenient().when(codec.encode(any())).thenReturn(ENCODED);
+        lenient().when(codec.contentType()).thenReturn(MimeTypeUtils.APPLICATION_JSON);
+    }
+
+    private void redisSync(boolean enabled) {
         SharedSyncWebSocketProperties.RedisSync redisSyncProps = mock(SharedSyncWebSocketProperties.RedisSync.class);
         given(props.getRedisSync()).willReturn(redisSyncProps);
-        given(redisSyncProps.isEnabled()).willReturn(false);
+        given(redisSyncProps.isEnabled()).willReturn(enabled);
+        if (enabled) {
+            given(redisSyncProps.getChannel()).willReturn("sync-channel");
+        }
+    }
 
-        String destination = "/topic/test";
-        Object payload = "test payload";
+    @Test
+    @DisplayName("publish: Redis 동기화가 비활성화 되어있으면 인코딩된 바이트를 로컬 transport 로만 보낸다")
+    void publish_local() {
+        redisSync(false);
 
-        // when
-        redisSyncService.publish(destination, payload);
+        redisSyncService.publish("/topic/test", "test payload");
 
-        // then
-        verify(messagingTemplate).convertAndSend(destination, payload);
+        verify(transport).send("/topic/test", ENCODED, MimeTypeUtils.APPLICATION_JSON);
         verifyNoInteractions(redisSyncTemplate);
     }
 
     @Test
-    @DisplayName("publish: Redis 동기화가 활성화 되어있으면 Redis 채널로 메시지를 발행한다")
+    @DisplayName("publish: Redis 동기화가 활성화 되어있으면 인코딩된 바이트를 Redis 채널로 발행한다")
     void publish_redis() {
-        // given
-        SharedSyncWebSocketProperties.RedisSync redisSyncProps = mock(SharedSyncWebSocketProperties.RedisSync.class);
-        given(props.getRedisSync()).willReturn(redisSyncProps);
-        given(redisSyncProps.isEnabled()).willReturn(true);
-        given(redisSyncProps.getChannel()).willReturn("sync-channel");
+        redisSync(true);
 
-        String destination = "/topic/test";
-        Object payload = "test payload";
+        redisSyncService.publish("/topic/test", "test payload");
 
-        // when
-        redisSyncService.publish(destination, payload);
-
-        // then
         ArgumentCaptor<RedisSyncMessage> captor = ArgumentCaptor.forClass(RedisSyncMessage.class);
         verify(redisSyncTemplate).convertAndSend(eq("sync-channel"), captor.capture());
 
         RedisSyncMessage message = captor.getValue();
-        assert message.getDestination().equals(destination);
-        assert message.getPayload().equals(payload);
-        verifyNoInteractions(messagingTemplate);
+        assertThat(message.getDestination()).isEqualTo("/topic/test");
+        assertThat(message.getPayload()).isEqualTo(ENCODED);
+        assertThat(message.getContentType()).isEqualTo(MimeTypeUtils.APPLICATION_JSON_VALUE);
+        assertThat(message.getTargetSessionId()).as("브로드캐스트는 대상 세션이 없다").isNull();
+        verifyNoInteractions(transport);
     }
 
     @Test
-    @DisplayName("sendToSession: 특정 세션을 대상으로 메시지를 전송한다")
-    void sendToSession_success() {
-        // given
-        String user = "user-123";
-        String sessionId = "session-456";
-        String destination = "/queue/private";
-        Object payload = "private payload";
+    @DisplayName("sendToSession: Redis 활성화 시에도 대상 세션 ID를 실어 Redis 를 경유한다 (다른 인스턴스의 세션에 도달하기 위해)")
+    void sendToSession_goesThroughRedis() {
+        redisSync(true);
 
-        // when
-        redisSyncService.sendToSession(user, sessionId, destination, payload);
+        redisSyncService.sendToSession("user-123", "session-456", "/topic/private", "private payload");
 
-        // then
-        verify(messagingTemplate).convertAndSendToUser(
-                eq(user),
-                eq(destination),
-                eq(payload),
-                any(Map.class));
+        ArgumentCaptor<RedisSyncMessage> captor = ArgumentCaptor.forClass(RedisSyncMessage.class);
+        verify(redisSyncTemplate).convertAndSend(eq("sync-channel"), captor.capture());
+
+        RedisSyncMessage message = captor.getValue();
+        assertThat(message.getTargetSessionId()).isEqualTo("session-456");
+        assertThat(message.getTargetUserId()).isEqualTo("user-123");
+        assertThat(message.getPayload()).isEqualTo(ENCODED);
+        verifyNoInteractions(transport);
     }
 
     @Test
-    @DisplayName("handleMessage: Redis 브로드캐스팅 메시지 수신 시 로컬 웹소켓에 전파한다")
-    void handleMessage_success() {
-        // given
+    @DisplayName("sendToSession: Redis 비활성화 시에는 로컬 transport 로 직접 보낸다")
+    void sendToSession_local() {
+        redisSync(false);
+
+        redisSyncService.sendToSession("user-123", "session-456", "/topic/private", "private payload");
+
+        verify(transport).sendToSession("user-123", "session-456", "/topic/private",
+                ENCODED, MimeTypeUtils.APPLICATION_JSON);
+        verifyNoInteractions(redisSyncTemplate);
+    }
+
+    @Test
+    @DisplayName("handleMessage: 브로드캐스트 메시지는 바이트 그대로 로컬 웹소켓에 전파한다 (재직렬화 없음)")
+    void handleMessage_broadcast() {
         RedisSyncMessage message = RedisSyncMessage.builder()
                 .destination("/topic/updates")
-                .payload("update data")
+                .payload(ENCODED)
+                .contentType(MimeTypeUtils.APPLICATION_JSON_VALUE)
                 .build();
 
-        // when
         redisSyncService.handleMessage(message);
 
-        // then
-        verify(messagingTemplate).convertAndSend("/topic/updates", "update data");
+        verify(transport).send("/topic/updates", ENCODED, MimeTypeUtils.APPLICATION_JSON);
+    }
+
+    @Test
+    @DisplayName("handleMessage: 대상 세션이 지정된 메시지는 해당 세션으로만 전달한다")
+    void handleMessage_targetedSession() {
+        RedisSyncMessage message = RedisSyncMessage.builder()
+                .destination("/topic/plan-presence/room-1")
+                .payload(ENCODED)
+                .contentType(MimeTypeUtils.APPLICATION_JSON_VALUE)
+                .targetSessionId("session-456")
+                .targetUserId("user-123")
+                .build();
+
+        redisSyncService.handleMessage(message);
+
+        verify(transport).sendToSession("user-123", "session-456", "/topic/plan-presence/room-1",
+                ENCODED, MimeTypeUtils.APPLICATION_JSON);
+        verify(transport, never()).send(any(), any(), any());
     }
 }

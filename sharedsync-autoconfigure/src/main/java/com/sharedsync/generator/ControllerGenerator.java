@@ -40,7 +40,7 @@ public class ControllerGenerator {
 		source.append("import com.sharedsync.shared.sync.RedisSyncService;\n");
 		source.append("import com.sharedsync.shared.history.HistoryService;\n");
 		source.append("import com.sharedsync.shared.storage.PresenceStorage;\n");
-		source.append("import org.springframework.messaging.simp.SimpAttributesContextHolder;\n\n");
+		source.append("import com.sharedsync.shared.transport.SyncSessionContext;\n\n");
 
 		for (CacheInformation info : cacheInfoList) {
 			source.append("import ").append(info.getRequestPath()).append(".").append(info.getRequestClassName())
@@ -59,6 +59,7 @@ public class ControllerGenerator {
 		source.append("    private final RedisSyncService redisSyncService;\n");
 		source.append("    private final HistoryService historyService;\n");
 		source.append("    private final PresenceStorage presenceStorage;\n");
+		source.append("    private final SyncSessionContext sessionContext;\n");
 		for (CacheInformation info : cacheInfoList) {
 			String serviceVar = decapitalizeFirst(info.getServiceClassName());
 			source.append("    private final ").append(info.getServiceClassName()).append(" ").append(serviceVar)
@@ -67,7 +68,7 @@ public class ControllerGenerator {
 		source.append("\n");
 
 		source.append(
-				"    public SharedSyncController(ObjectMapper objectMapper, RedisSyncService redisSyncService, HistoryService historyService, PresenceStorage presenceStorage");
+				"    public SharedSyncController(ObjectMapper objectMapper, RedisSyncService redisSyncService, HistoryService historyService, PresenceStorage presenceStorage, SyncSessionContext sessionContext");
 		for (CacheInformation info : cacheInfoList) {
 			source.append(", ").append(info.getServiceClassName()).append(" ")
 					.append(decapitalizeFirst(info.getServiceClassName()));
@@ -77,6 +78,7 @@ public class ControllerGenerator {
 		source.append("        this.redisSyncService = redisSyncService;\n");
 		source.append("        this.historyService = historyService;\n");
 		source.append("        this.presenceStorage = presenceStorage;\n");
+		source.append("        this.sessionContext = sessionContext;\n");
 		for (CacheInformation info : cacheInfoList) {
 			String serviceVar = decapitalizeFirst(info.getServiceClassName());
 			source.append("        this.").append(serviceVar).append(" = ").append(serviceVar).append(";\n");
@@ -87,7 +89,7 @@ public class ControllerGenerator {
 		source.append("    public void handle(@DestinationVariable(\"roomId\") String roomId, \n");
 		source.append("                         @Payload java.util.Map<String, Object> payload) {\n\n");
 
-		source.append("        String sessionId = SimpAttributesContextHolder.currentAttributes().getSessionId();\n");
+		source.append("        String sessionId = sessionContext.currentSessionId();\n");
 		source.append("        String mappedRoomId = presenceStorage.getRootIdBySessionId(sessionId);\n");
 		source.append("        if (mappedRoomId == null || !mappedRoomId.equals(roomId)) return;\n\n");
 
@@ -114,7 +116,15 @@ public class ControllerGenerator {
 					.append(" request = objectMapper.convertValue(payload, ").append(info.getRequestClassName())
 					.append(".class);\n");
 			source.append("                request.setRootId(roomId);\n");
-			source.append("                result = handleAction(").append(serviceVar).append(", request);\n");
+			source.append("                Object res = handleAction(").append(serviceVar).append(", request);\n");
+			// 응답을 타입화된 엔벨로프로 감싼다. 일반 편집과 undo/redo 가 같은 모양으로 나가게 하려는 것.
+			source.append("                if (res instanceof ").append(info.getResponseClassName())
+					.append(" typed) {\n");
+			source.append("                    result = new com.sharedsync.shared.codec.SyncOutbound.Entities(\n");
+			source.append("                            typed.getEventId(), typed.getAction(), typed.getEntity(), false,\n");
+			source.append("                            \"").append(decapitalizeFirst(info.getDtoClassName())).append("s\",\n");
+			source.append("                            typed.get").append(info.getDtoClassName()).append("s());\n");
+			source.append("                }\n");
 			source.append("                break;\n");
 			source.append("            }\n");
 		}

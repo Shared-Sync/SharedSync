@@ -20,6 +20,10 @@ import lombok.Setter;
 
 @SupportedAnnotationTypes("com.sharedsync.shared.annotation.CacheEntity")
 @SupportedSourceVersion(SourceVersion.RELEASE_17)
+@javax.annotation.processing.SupportedOptions({
+        ProtoSchemaGenerator.OPTION_PACKAGE,
+        ProtoSchemaGenerator.OPTION_FILE
+})
 public class Generator extends AbstractProcessor {
 
     List<CacheInformation> cacheInfoList;
@@ -314,6 +318,7 @@ public class Generator extends AbstractProcessor {
 
         if (roundEnv.processingOver()) {
             ControllerGenerator.generateUnified(cacheInfoList, processingEnv);
+            ProtoSchemaGenerator.generate(cacheInfoList, processingEnv);
         }
 
         return false;

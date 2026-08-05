@@ -1,11 +1,11 @@
 package com.sharedsync.shared.presence.core;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
+import com.sharedsync.shared.codec.SyncOutbound;
 import com.sharedsync.shared.sync.RedisSyncService;
 
 import lombok.RequiredArgsConstructor;
@@ -24,7 +24,7 @@ public class PresenceBroadcaster {
             Map<String, Object> userInfo,
             List<Map<String, Object>> users
     ) {
-        Map<String, Object> payload = createPayload(uid, userInfo, users, action);
+        SyncOutbound.Presence payload = createPayload(uid, userInfo, users, action);
 
         redisSyncService.publish(
                 String.format("/topic/%s/%s", entityName, roomId),
@@ -42,7 +42,7 @@ public class PresenceBroadcaster {
             Map<String, Object> userInfo,
             List<Map<String, Object>> users
     ) {
-        Map<String, Object> payload = createPayload(uid, userInfo, users, action);
+        SyncOutbound.Presence payload = createPayload(uid, userInfo, users, action);
 
         redisSyncService.sendToSession(
                 user,
@@ -52,18 +52,13 @@ public class PresenceBroadcaster {
         );
     }
 
-    public Map<String, Object> createPayload(
+    public SyncOutbound.Presence createPayload(
             String uid,
             Map<String, Object> userInfo,
             List<Map<String, Object>> users,
             String action
     ) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("uid", uid);
-        payload.put("userInfo", userInfo);
-        payload.put("users", users);
-        payload.put("action", action);
-        return payload;
+        return new SyncOutbound.Presence(action, uid, userInfo, users);
     }
 
 }

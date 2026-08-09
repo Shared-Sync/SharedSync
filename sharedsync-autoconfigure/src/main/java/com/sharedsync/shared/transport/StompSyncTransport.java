@@ -5,7 +5,6 @@ import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessageType;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.support.MessageBuilder;
-import org.springframework.stereotype.Component;
 import org.springframework.util.MimeType;
 
 import lombok.RequiredArgsConstructor;
@@ -20,8 +19,10 @@ import lombok.RequiredArgsConstructor;
  * JSON codec 기준으로 클라이언트가 보는 프레임은 MappingJackson2MessageConverter 를 쓰던 때와
  * 동일하다: content-type 이 octet-stream 이 아니므로 StompSubProtocolHandler 가 TextMessage 로
  * 내보내고, 바이트는 그대로 UTF-8 JSON 이다.
+ *
+ * 빈 등록은 SharedWebSocketConfig 가 한다 — @Component 로 두면 STOMP 를 끈 raw WS 모드에서
+ * 존재하지 않는 SimpMessagingTemplate 을 주입받으려다 기동이 깨진다.
  */
-@Component
 @RequiredArgsConstructor
 public class StompSyncTransport implements SyncTransport {
 

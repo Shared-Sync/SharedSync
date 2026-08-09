@@ -26,6 +26,7 @@ import com.sharedsync.shared.listener.PresenceSessionManager;
 import com.sharedsync.shared.presence.core.PresenceRootResolver;
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
+import com.sharedsync.shared.transport.SyncFrameExecutor;
 import com.sharedsync.shared.transport.SyncWebSocketHandler;
 import com.sharedsync.shared.transport.SyncSessionContext;
 import com.sharedsync.shared.transport.WebSocketPingScheduler;
@@ -84,6 +85,17 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
         return new WebSocketSessionRegistry();
     }
 
+    /**
+     * 프레임 처리를 컨테이너 읽기 스레드에서 분리한다. STOMP 의 clientInboundChannel 자리다.
+     */
+    @Bean
+    public SyncFrameExecutor syncFrameExecutor() {
+        int threads = props.getDispatchThreads() > 0
+                ? props.getDispatchThreads()
+                : Math.max(4, Runtime.getRuntime().availableProcessors() * 2);
+        return new SyncFrameExecutor(threads, props.getDispatchQueueLimit());
+    }
+
     @Bean
     public SyncTransport webSocketSyncTransport(WebSocketSessionRegistry registry) {
         return new WebSocketSyncTransport(registry);
@@ -108,10 +120,11 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
             PresenceSessionManager presenceSessionManager,
             PresenceRootResolver presenceRootResolver,
             SharedSyncAuthProperties authProperties,
-            ObjectProvider<SyncAccessValidator> accessValidator
+            ObjectProvider<SyncAccessValidator> accessValidator,
+            SyncFrameExecutor frameExecutor
     ) {
         return new SyncWebSocketHandler(registry, decoder, requireProtoCodec(codec), dispatcher,
-                presenceSessionManager, presenceRootResolver, authProperties, accessValidator);
+                presenceSessionManager, presenceRootResolver, authProperties, frameExecutor, accessValidator);
     }
 
     /**

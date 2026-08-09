@@ -48,6 +48,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
     private final PresenceSessionManager presenceSessionManager;
     private final PresenceRootResolver presenceRootResolver;
     private final SharedSyncAuthProperties authProperties;
+    private final SyncFrameExecutor frameExecutor;
     /** 앱이 제공하지 않으면 인가 없이 통과한다 (auth.enabled=false 데모 모드와 같은 취급). */
     private final ObjectProvider<SyncAccessValidator> accessValidator;
 
@@ -72,21 +73,43 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             return;
         }
 
-        presenceSessionManager.handleHeartbeat(sessionId);
-
-        if (frame instanceof ClientFrame.Join join) {
-            handleJoin(session, join);
-        } else if (frame instanceof ClientFrame.Edit edit) {
-            handleEdit(session, edit);
-        } else if (frame instanceof ClientFrame.Ping) {
+        // ping 은 상태를 건드리지 않으니 읽기 스레드에서 바로 답한다. 오히려 이게 하트비트의 목적에 맞다 —
+        // 편집 큐가 밀려 있어도 생존 확인은 즉시 돌아가야 한다.
+        if (frame instanceof ClientFrame.Ping) {
+            presenceSessionManager.handleHeartbeat(sessionId);
             send(sessionId, codec.encodePong());
-        } else if (frame instanceof ClientFrame.Unknown unknown) {
-            log.debug("[SharedSync] 처리할 수 없는 프레임 sessionId={}: {}", sessionId, unknown.detail());
-            send(sessionId, codec.encodeError("UNKNOWN_FRAME", unknown.detail()));
+            return;
+        }
+
+        // 나머지는 DB·Redis 를 건드린다. 컨테이너의 읽기 스레드에서 하면 그 소켓이 통째로 막힌다.
+        boolean accepted = frameExecutor.submit(sessionId, () -> process(session, frame));
+        if (!accepted) {
+            // 큐 한도 초과. 조용히 버리면 클라이언트는 편집이 반영된 줄 안다.
+            send(sessionId, codec.encodeError("BACKPRESSURE", "처리 대기열이 가득 찼다. 잠시 후 재시도할 것"));
         }
     }
 
-    private void handleJoin(WebSocketSession session, ClientFrame.Join join) throws Exception {
+    /** 프레임 실행기 스레드에서 돈다. 세션별 순서는 실행기가 보장한다. */
+    private void process(WebSocketSession session, ClientFrame frame) {
+        String sessionId = session.getId();
+        try {
+            presenceSessionManager.handleHeartbeat(sessionId);
+
+            if (frame instanceof ClientFrame.Join join) {
+                handleJoin(session, join);
+            } else if (frame instanceof ClientFrame.Edit edit) {
+                handleEdit(session, edit);
+            } else if (frame instanceof ClientFrame.Unknown unknown) {
+                log.debug("[SharedSync] 처리할 수 없는 프레임 sessionId={}: {}", sessionId, unknown.detail());
+                send(sessionId, codec.encodeError("UNKNOWN_FRAME", unknown.detail()));
+            }
+        } catch (Exception e) {
+            log.error("[SharedSync] 프레임 처리 실패 sessionId={}: {}", sessionId, e.getMessage(), e);
+            send(sessionId, codec.encodeError("INTERNAL_ERROR", e.getMessage()));
+        }
+    }
+
+    private void handleJoin(WebSocketSession session, ClientFrame.Join join) {
         String sessionId = session.getId();
         String roomId = join.roomId();
 
@@ -102,14 +125,14 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
                     sessionId, join.schemaHash(), serverHash);
             send(sessionId, codec.encodeError("SCHEMA_MISMATCH",
                     "클라이언트 스키마가 서버와 다르다. server=" + serverHash));
-            session.close(CloseStatus.POLICY_VIOLATION);
+            closeQuietly(session, CloseStatus.POLICY_VIOLATION);
             return;
         }
 
         String userId = userIdOf(session);
         if (authProperties.isEnabled() && userId == null) {
             send(sessionId, codec.encodeError("UNAUTHENTICATED", "핸드셰이크에서 사용자를 확인하지 못했다"));
-            session.close(CloseStatus.POLICY_VIOLATION);
+            closeQuietly(session, CloseStatus.POLICY_VIOLATION);
             return;
         }
 
@@ -120,7 +143,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             } catch (Exception e) {
                 log.info("[SharedSync] 룸 접근 거부 userId={} roomId={}: {}", userId, roomId, e.getMessage());
                 send(sessionId, codec.encodeError("ACCESS_DENIED", "룸에 접근할 수 없다"));
-                session.close(CloseStatus.POLICY_VIOLATION);
+                closeQuietly(session, CloseStatus.POLICY_VIOLATION);
                 return;
             }
         }
@@ -130,7 +153,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
         presenceSessionManager.handleSubscribe(roomId, userId, sessionId);
     }
 
-    private void handleEdit(WebSocketSession session, ClientFrame.Edit edit) throws Exception {
+    private void handleEdit(WebSocketSession session, ClientFrame.Edit edit) {
         String sessionId = session.getId();
         String roomId = registry.roomOf(sessionId);
         if (roomId == null) {
@@ -138,6 +161,8 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             return;
         }
 
+        // ThreadLocal 은 실행기 스레드에 묶인다. 프레임마다 bind/clear 하므로 스레드가 재사용돼도
+        // 이전 세션의 ID 가 남지 않는다.
         WebSocketSyncSessionContext.bind(sessionId);
         try {
             dispatcher.dispatch(roomId, edit);
@@ -159,7 +184,18 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String sessionId = session.getId();
         registry.remove(sessionId);
-        presenceSessionManager.handleDisconnect(userIdOf(session), sessionId);
+        // 남아 있던 편집 프레임은 버린다 — 결과를 보낼 곳이 이미 없다. 퇴장 처리(프레즌스·히스토리
+        // 정리)는 그 뒤에 실행기에서 돈다. Redis 왕복이라 컨테이너 스레드에서 하면 안 된다.
+        frameExecutor.terminate(sessionId, () ->
+                presenceSessionManager.handleDisconnect(userIdOf(session), sessionId));
+    }
+
+    private void closeQuietly(WebSocketSession session, CloseStatus status) {
+        try {
+            session.close(status);
+        } catch (Exception e) {
+            log.debug("[SharedSync] 세션 종료 실패 sessionId={}: {}", session.getId(), e.getMessage());
+        }
     }
 
     @Override

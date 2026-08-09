@@ -71,6 +71,22 @@ public class SharedSyncWebSocketProperties {
     private int maxFrameSize = 256 * 1024;
 
     /**
+     * 프레임 처리 스레드 수. 0 이면 CPU 코어 수 × 2 (최소 4).
+     *
+     * 프레임은 이 풀에서 처리되고 세션별로만 직렬화된다. raw WebSocket 은 핸들러가 소켓 읽기
+     * 스레드에서 도는데, 거기서 DB·Redis 를 만지면 그 소켓이 통째로 막힌다.
+     */
+    private int dispatchThreads = 0;
+
+    /**
+     * 세션 하나가 쌓아둘 수 있는 대기 프레임 수. 넘으면 BACKPRESSURE 에러를 돌려준다.
+     *
+     * 무한 큐를 두면 느린 처리 뒤에 프레임이 무한히 쌓여 힙이 먼저 죽는다. 거절해서 클라이언트가
+     * 알게 하는 편이 낫다 — 조용히 버리면 클라이언트는 편집이 반영된 줄 안다.
+     */
+    private int dispatchQueueLimit = 200;
+
+    /**
      * 생성된 wire 스키마(.proto)를 서빙할 경로. 비우면 서빙하지 않는다.
      *
      * 기본값이 endpoint 하위인 이유: 앱의 시큐리티 화이트리스트는 보통 WebSocket 핸드셰이크

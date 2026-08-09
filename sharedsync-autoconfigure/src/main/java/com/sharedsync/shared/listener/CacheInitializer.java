@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import com.sharedsync.shared.dto.CacheDto;
 import com.sharedsync.shared.repository.AutoCacheRepository;
+import com.sharedsync.shared.context.CacheLoadingContext;
 import com.sharedsync.shared.storage.PresenceStorage;
 
 import jakarta.annotation.PostConstruct;
@@ -49,11 +50,15 @@ public class CacheInitializer {
 
         // 로딩 시작 마킹
         presenceStorage.setIsLoading(rootId, true);
+        // 적재 주체를 표시한다. 이게 없으면 아래 loadRecursively 안의 findDtosByParentId 가
+        // 방금 자기가 켠 LOADING 플래그를 기다리며 5초를 통째로 버린다.
+        CacheLoadingContext.begin(rootId);
 
         try {
             loadRecursively(rootRepo, rootId);
         } finally {
             // 로딩 완료 후 해제 (성공하든 실패하든)
+            CacheLoadingContext.end();
             presenceStorage.setIsLoading(rootId, false);
         }
     }

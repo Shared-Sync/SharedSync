@@ -35,6 +35,7 @@ import com.sharedsync.shared.repository.support.IdGenerator;
 import com.sharedsync.shared.repository.support.IdTypeConverter;
 import com.sharedsync.shared.repository.support.ParentIndex;
 import com.sharedsync.shared.repository.support.ReflectionSupport;
+import com.sharedsync.shared.context.CacheLoadingContext;
 import com.sharedsync.shared.storage.PresenceStorage;
 
 import jakarta.annotation.PostConstruct;
@@ -913,6 +914,10 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
 
     private void waitForLoading(Object id) {
         if (id == null)
+            return;
+        // 적재 스레드 자신은 기다리지 않는다. 자기가 켠 플래그를 기다리면 폴링 한도를 다 쓰고 나서야
+        // 진행되므로, 첫 입장마다 조용히 5초가 사라진다.
+        if (CacheLoadingContext.isCurrentLoader(id))
             return;
 
         try {

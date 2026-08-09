@@ -21,6 +21,7 @@ import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 
+import com.sharedsync.shared.auth.WsAuthChannelInterceptor;
 import com.sharedsync.shared.listener.PresenceSessionManager;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.transport.StompSyncTransport;
@@ -39,16 +40,19 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
     private final SharedSyncWebSocketProperties props;
     private final List<HandshakeInterceptor> handshakeInterceptors;
     private final PresenceSessionManager presenceSessionManager;
+    private final ObjectProvider<WsAuthChannelInterceptor> authInterceptor;
 
     public SharedWebSocketConfig(
             SharedSyncWebSocketProperties props,
             ObjectProvider<List<HandshakeInterceptor>> interceptors,
-            @Lazy PresenceSessionManager presenceSessionManager
+            @Lazy PresenceSessionManager presenceSessionManager,
+            ObjectProvider<WsAuthChannelInterceptor> authInterceptor
     ) {
         this.props = props;
         this.handshakeInterceptors =
                 interceptors.getIfAvailable(Collections::emptyList);
         this.presenceSessionManager = presenceSessionManager;
+        this.authInterceptor = authInterceptor;
     }
 
     @Override
@@ -81,6 +85,13 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
+        // 인증·인가. 예전에는 이 등록을 프레임워크가 하지 않아 WsAuthChannelInterceptor 가 빈으로만
+        // 존재하고 한 번도 호출되지 않았고, 앱이 자기 설정으로 직접 걸어줘야 했다.
+        WsAuthChannelInterceptor auth = authInterceptor.getIfAvailable();
+        if (auth != null) {
+            registration.interceptors(auth);
+        }
+
         registration.interceptors(new ChannelInterceptor() {
             @Override
             public Message<?> preSend(Message<?> message, MessageChannel channel) {

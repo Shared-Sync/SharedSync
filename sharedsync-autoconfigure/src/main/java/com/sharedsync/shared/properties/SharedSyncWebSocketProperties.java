@@ -4,9 +4,19 @@ import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import jakarta.annotation.PostConstruct;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
+/**
+ * 설정값 하나만 바꾸면 나머지는 프레임워크가 맞춘다.
+ *
+ * transport/codec/sockjs 는 서로 아무 조합이나 성립하지 않는다(§normalize). 예전에는 어긋난
+ * 조합을 기동 시 예외로 막았는데, 그러면 "protobuf 로 바꾸려면 설정 세 개를 함께 고쳐라"가 되어
+ * 앱이 프레임워크의 내부 제약을 알아야 한다. 지금은 어긋난 값을 프레임워크가 보정하고 로그만 남긴다.
+ */
+@Slf4j
 @Getter
 @Setter
 @ConfigurationProperties(prefix = "sharedsync.websocket")
@@ -31,8 +41,7 @@ public class SharedSyncWebSocketProperties {
     /**
      * 전송 계층. stomp(기본, 현행) | websocket(raw WebSocket + 바이너리 프레임)
      *
-     * websocket 은 codec=protobuf 를 전제한다. 프레임 자체가 ClientFrame/ServerFrame 이라
-     * JSON 코덱으로는 인바운드를 해석할 수 없다 (기동 시 검증한다).
+     * 이것만 바꾸면 된다. codec 과 sockjs 는 normalize() 가 맞춘다.
      */
     private String transport = "stomp";
 
@@ -49,14 +58,58 @@ public class SharedSyncWebSocketProperties {
      *
      * 바이너리 codec 과는 함께 쓸 수 없다. StompSubProtocolHandler 는 SockJS 세션이면
      * BinaryMessage 를 보내지 않고 바이트를 TextMessage 로 UTF-8 디코딩해 **예외 없이 손상**시킨다.
-     * 그래서 기동 시 조합을 검증해 즉시 실패시킨다.
+     * codec=protobuf 면 normalize() 가 자동으로 끈다.
      */
     private boolean sockjs = true;
+
+    /**
+     * 인바운드 프레임 최대 크기(바이트).
+     *
+     * 컨테이너 기본값은 8KB 라 블록을 여러 개 담은 편집이 그걸 넘으면 프레임이 쪼개지는데,
+     * 핸들러는 부분 메시지를 조립하지 않는다. STOMP 는 프레임 조립을 브로커가 해줬다.
+     */
+    private int maxFrameSize = 256 * 1024;
+
+    /**
+     * 생성된 wire 스키마(.proto)를 서빙할 경로. 비우면 서빙하지 않는다.
+     *
+     * 기본값이 endpoint 하위인 이유: 앱의 시큐리티 화이트리스트는 보통 WebSocket 핸드셰이크
+     * 경로를 이미 열어두므로("/ws/**"), 그 아래에 두면 앱이 설정을 더 고칠 필요가 없다.
+     */
+    private String schemaPath = "";
 
     /**
      * Redis Sync Settings
      */
     private RedisSync redisSync = new RedisSync();
+
+    /**
+     * 서로 어긋나는 조합을 프레임워크가 보정한다. 앱은 transport(또는 codec) 하나만 정하면 된다.
+     */
+    @PostConstruct
+    public void normalize() {
+        if (isRawWebSocket() && !isProtobuf()) {
+            // raw WS 프레임은 ClientFrame/ServerFrame 이라 JSON 코덱으로는 인바운드를 해석할 수 없다.
+            log.info("[SharedSync] transport=websocket 이므로 codec 을 protobuf 로 맞춘다 (설정값: {})", codec);
+            codec = "protobuf";
+        }
+        if (isProtobuf() && sockjs) {
+            // SockJS 세션은 바이너리 프레임을 보내지 못해 바이트가 UTF-8 로 디코딩되며 조용히 손상된다.
+            log.info("[SharedSync] codec=protobuf 이므로 SockJS 폴백을 끈다 (바이너리 프레임과 양립 불가)");
+            sockjs = false;
+        }
+        if (schemaPath == null || schemaPath.isBlank()) {
+            schemaPath = endpoint + "/schema.proto";
+        }
+    }
+
+    public boolean isRawWebSocket() {
+        return "websocket".equalsIgnoreCase(transport);
+    }
+
+    public boolean isProtobuf() {
+        return "protobuf".equalsIgnoreCase(codec);
+    }
 
     @Getter
     @Setter

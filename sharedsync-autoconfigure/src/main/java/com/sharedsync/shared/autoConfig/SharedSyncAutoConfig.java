@@ -8,6 +8,8 @@ import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.web.servlet.function.RouterFunction;
+import org.springframework.web.servlet.function.ServerResponse;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedsync.shared.codec.JsonSyncCodec;
@@ -18,6 +20,7 @@ import com.sharedsync.shared.config.RedisConfig;
 import com.sharedsync.shared.config.RedisSyncConfig;
 import com.sharedsync.shared.config.SharedSyncRawWebSocketConfig;
 import com.sharedsync.shared.config.SharedWebSocketConfig;
+import com.sharedsync.shared.controller.SyncSchemaController;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.transport.StompSyncSessionContext;
 import com.sharedsync.shared.transport.SyncSessionContext;
@@ -36,26 +39,25 @@ public class SharedSyncAutoConfig {
     @Bean
     @ConditionalOnMissingBean(SyncCodec.class)
     public SyncCodec syncCodec(ObjectMapper objectMapper, SharedSyncWebSocketProperties props) {
-        boolean stompTransport = !"websocket".equalsIgnoreCase(props.getTransport());
-
-        if ("protobuf".equalsIgnoreCase(props.getCodec())) {
-            // SockJS 세션에는 BinaryMessage 를 보낼 수 없다. 그대로 두면 바이트가 UTF-8 로
-            // 디코딩되어 예외 없이 손상되므로, 여기서 명확히 실패시킨다.
-            // raw WS 모드에는 SockJS 폴백 자체가 없으므로 이 조합 검사도 필요 없다.
-            if (stompTransport && props.isSockjs()) {
-                throw new IllegalStateException(
-                        "sharedsync.websocket.codec=protobuf 는 SockJS 와 함께 쓸 수 없다. "
-                                + "sharedsync.websocket.sockjs=false 로 둘 것. "
-                                + "(SockJS 세션은 바이너리 프레임을 보내지 못해 페이로드가 조용히 손상된다)");
-            }
+        // 조합 보정은 SharedSyncWebSocketProperties.normalize() 가 이미 끝냈다.
+        // 여기서는 결정된 값을 그대로 따른다.
+        if (props.isProtobuf()) {
             return new ProtoSyncCodec(new SyncDescriptors());
         }
-        if (!stompTransport) {
-            throw new IllegalStateException(
-                    "sharedsync.websocket.transport=websocket 은 codec=protobuf 를 전제한다. "
-                            + "sharedsync.websocket.codec=protobuf 로 둘 것.");
-        }
         return new JsonSyncCodec(objectMapper);
+    }
+
+    /**
+     * 생성된 wire 스키마를 그대로 내려주는 엔드포인트.
+     *
+     * 클라이언트는 이 바이트로 코드를 생성하고, 같은 바이트의 해시를 Join 에 실어 보낸다.
+     * 앱이 만들어야 하는 것이 아니라 프레임워크가 제공한다 — 스키마는 프레임워크 생성물이고,
+     * 앱은 자기 엔티티에 @CacheEntity 를 붙였을 뿐이다.
+     */
+    @Bean
+    public RouterFunction<ServerResponse> sharedSyncSchemaRoutes(SyncCodec codec,
+                                                                 SharedSyncWebSocketProperties props) {
+        return new SyncSchemaController(codec, props).routes();
     }
 
     /**

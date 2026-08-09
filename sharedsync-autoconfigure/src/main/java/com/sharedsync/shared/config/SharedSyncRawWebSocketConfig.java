@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
+import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
 import org.springframework.web.socket.server.HandshakeInterceptor;
@@ -63,6 +64,19 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
                 .setAllowedOrigins(props.getAllowedOrigins().toArray(new String[0]))
                 .addInterceptors(handshakeInterceptors.toArray(new HandshakeInterceptor[0]));
         // SockJS 는 붙이지 않는다. 텍스트 프레임만 보낼 수 있어 바이너리 wire 와 양립하지 않는다.
+    }
+
+    /**
+     * 인바운드 프레임 버퍼. 컨테이너 기본값(8KB)을 넘는 편집이 오면 프레임이 쪼개지는데 핸들러는
+     * 부분 메시지를 조립하지 않는다 — STOMP 에서는 브로커가 해주던 일이라 앱이 알 필요가 없었다.
+     */
+    @Bean
+    @ConditionalOnMissingBean(ServletServerContainerFactoryBean.class)
+    public ServletServerContainerFactoryBean sharedSyncServletContainer() {
+        ServletServerContainerFactoryBean container = new ServletServerContainerFactoryBean();
+        container.setMaxBinaryMessageBufferSize(props.getMaxFrameSize());
+        container.setMaxTextMessageBufferSize(props.getMaxFrameSize());
+        return container;
     }
 
     @Bean

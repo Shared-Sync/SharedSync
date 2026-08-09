@@ -1,0 +1,59 @@
+name: CI
+
+# 이 저장소에는 CI 가 없었다. 그래서 transport SPI 도입(9a5d958)이 HistoryServiceTest 를
+# 깨뜨린 것을 아무도 보지 못했고, 소비 앱(Backend-v2) 테스트만 돌리는 습관으로 굳었다.
+#
+# JitPack 검증을 함께 도는 이유: SharedSync 는 JitPack 에서 **소스로** 빌드되므로, 로컬에서
+# 테스트가 통과해도 clean clone 빌드가 깨지면 소비 앱이 의존성을 못 받는다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test
+        run: ./gradlew test
+
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: '**/build/reports/tests/test'
+
+  jitpack-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # JitPack 이 실제로 도는 것과 같은 태스크. 여기서 깨지면 소비 앱은 의존성 해석 단계에서 막힌다.
+      - name: publishToMavenLocal (JitPack 이 하는 일)
+        run: ./gradlew publishToMavenLocal

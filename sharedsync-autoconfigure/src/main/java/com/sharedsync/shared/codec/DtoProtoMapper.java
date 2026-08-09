@@ -77,9 +77,13 @@ public final class DtoProtoMapper {
                     if (count == 0) {
                         continue;
                     }
+                    // 요소 타입을 제네릭에서 뽑아 넘긴다. Object.class 로 넘기면 ProtoValueConverter 가
+                    // 되돌릴 대상을 몰라 UUID·enum·BigDecimal 컬렉션이 문자열인 채로 DTO 에 들어간다
+                    // (넣는 순간은 지네릭 소거 때문에 통과하고, 나중에 꺼내 쓸 때 ClassCastException).
+                    Class<?> elementType = elementTypeOf(field);
                     List<Object> values = new ArrayList<>(count);
                     for (int i = 0; i < count; i++) {
-                        values.add(ProtoValueConverter.toJava(message.getRepeatedField(fd, i), Object.class));
+                        values.add(ProtoValueConverter.toJava(message.getRepeatedField(fd, i), elementType));
                     }
                     field.set(dto, values);
                     continue;
@@ -99,6 +103,17 @@ public final class DtoProtoMapper {
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("DTO 생성 실패: " + dtoClass.getName(), e);
         }
+    }
+
+    /** {@code List<UUID>} 의 UUID. 알아낼 수 없으면 Object (변환 없이 그대로). */
+    private static Class<?> elementTypeOf(Field field) {
+        if (field.getGenericType() instanceof java.lang.reflect.ParameterizedType parameterized) {
+            java.lang.reflect.Type[] arguments = parameterized.getActualTypeArguments();
+            if (arguments.length == 1 && arguments[0] instanceof Class<?> type) {
+                return type;
+            }
+        }
+        return Object.class;
     }
 
     /** proto 필드명(snake_case) -> DTO Field */

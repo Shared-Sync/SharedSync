@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -59,6 +60,19 @@ public class HistoryService {
 
     public boolean isSupported() {
         return redisTemplate != null;
+    }
+
+    /**
+     * undo/redo 는 Redis 가 있어야 동작한다. 없으면 record/undo/redo 가 전부 조용히 no-op 이 되어
+     * "undo 눌러도 아무 일도 안 일어난다"로만 드러난다. 기동 시 한 번 알린다.
+     */
+    @jakarta.annotation.PostConstruct
+    void warnIfDisabled() {
+        if (!isSupported()) {
+            LoggerFactory.getLogger(HistoryService.class).warn(
+                    "[SharedSync] presenceRedis RedisTemplate 이 없어 undo/redo 히스토리가 비활성화된다. "
+                            + "편집은 정상 동작하지만 undo 요청은 아무 것도 하지 않는다.");
+        }
     }
 
     public void record(String rootId, HistoryAction action) {

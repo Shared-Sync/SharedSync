@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.PingMessage;
@@ -36,6 +37,12 @@ public class WebSocketSessionRegistry {
 
     /** roomId -> sessionId 집합 */
     private final Map<String, Set<String>> roomSessions = new ConcurrentHashMap<>();
+
+    /**
+     * 보내지 못한 프레임 수. 전송 실패는 "이 클라이언트만 편집을 못 받았다"는 뜻이라 화면이
+     * 조용히 갈라진다. 세지 않으면 아무도 모른다.
+     */
+    private final AtomicLong sendFailures = new AtomicLong();
 
     /** 핸드셰이크 직후 등록. 아직 어느 룸에도 속하지 않는다 (Join 을 받아야 한다). */
     public WebSocketSession register(WebSocketSession raw) {
@@ -85,6 +92,18 @@ public class WebSocketSessionRegistry {
         return sessions.keySet();
     }
 
+    public long sendFailureCount() {
+        return sendFailures.get();
+    }
+
+    public int roomCount() {
+        return roomSessions.size();
+    }
+
+    public int sessionCount() {
+        return sessions.size();
+    }
+
     /** 룸의 모든 세션에 바이너리 프레임을 보낸다. */
     public void broadcast(String roomId, byte[] payload) {
         Set<String> members = roomSessions.get(roomId);
@@ -105,7 +124,10 @@ public class WebSocketSessionRegistry {
         try {
             session.sendMessage(new BinaryMessage(payload));
         } catch (IOException | IllegalStateException e) {
-            log.debug("[SharedSync] WS 전송 실패 sessionId={}: {}", sessionId, e.getMessage());
+            // 이 세션만 이 편집을 못 받은 것이다. 다시 보내지 않으므로 화면이 갈라진 채로 남는다.
+            sendFailures.incrementAndGet();
+            log.warn("[SharedSync] WS 전송 실패 sessionId={} bytes={}: {}",
+                    sessionId, payload.length, e.getMessage());
         }
     }
 

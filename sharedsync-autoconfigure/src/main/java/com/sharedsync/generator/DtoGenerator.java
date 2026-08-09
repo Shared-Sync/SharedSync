@@ -49,7 +49,8 @@ public class DtoGenerator {
                 writer.write(source);
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            processingEnv.getMessager().printMessage(javax.tools.Diagnostic.Kind.ERROR,
+                    "[SharedSync] DTO 생성 실패: " + cacheInfo.getDtoClassName() + " | " + e.getMessage());
         }
 
         return true;

@@ -34,7 +34,8 @@ public class CacheEntityGenerator{
             writer.write(source);
             writer.close();
         } catch (IOException e) {
-            e.printStackTrace();
+            processingEnv.getMessager().printMessage(javax.tools.Diagnostic.Kind.ERROR,
+                    "[SharedSync] 캐시 엔티티 생성 실패: " + cacheInfo.getCacheClassName() + " | " + e.getMessage());
         }
         
         return true;

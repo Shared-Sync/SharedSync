@@ -265,7 +265,9 @@ public class ProtoSchemaGenerator {
                 writer.write(protoText);
             }
         } catch (IOException e) {
-            env.getMessager().printMessage(Diagnostic.Kind.WARNING,
+            // 스키마가 없으면 클라이언트가 코드를 생성할 근거를 잃는다. 경고로 넘기면
+            // 서버만 새 스키마를 갖고 클라는 옛 스키마로 붙어 해시 불일치가 배포 후에 드러난다.
+            env.getMessager().printMessage(Diagnostic.Kind.ERROR,
                     "[SharedSync] .proto 파일 기록 실패: " + e.getMessage());
         }
     }
@@ -298,7 +300,9 @@ public class ProtoSchemaGenerator {
                 writer.write(source);
             }
         } catch (IOException e) {
-            env.getMessager().printMessage(Diagnostic.Kind.WARNING,
+            // SyncSchema 가 없으면 protobuf 코덱이 런타임에야 실패한다(SyncDescriptors 가 이 클래스를
+            // 리플렉션으로 찾는다). 컴파일 시점에 끝내는 편이 낫다.
+            env.getMessager().printMessage(Diagnostic.Kind.ERROR,
                     "[SharedSync] SyncSchema 생성 실패: " + e.getMessage());
         }
     }

@@ -231,7 +231,10 @@ public class ControllerGenerator {
 			writer.write(source.toString());
 			writer.close();
 		} catch (IOException e) {
-			e.printStackTrace();
+			// 여기서 삼키면 컨트롤러 없는 앱이 정상 빌드된다 — 편집 메시지가 어디에도 닿지 않는
+			// 상태로 배포될 수 있다. 컴파일을 깨는 편이 낫다.
+			processingEnv.getMessager().printMessage(javax.tools.Diagnostic.Kind.ERROR,
+					"[SharedSync] SharedSyncController 생성 실패: " + e.getMessage());
 		}
 	}
 

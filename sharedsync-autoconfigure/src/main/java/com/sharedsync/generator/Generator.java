@@ -318,6 +318,7 @@ public class Generator extends AbstractProcessor {
 
         if (roundEnv.processingOver()) {
             ControllerGenerator.generateUnified(cacheInfoList, processingEnv);
+            CacheDtoRegistryGenerator.generate(cacheInfoList, processingEnv);
             ProtoSchemaGenerator.generate(cacheInfoList, processingEnv);
         }
 

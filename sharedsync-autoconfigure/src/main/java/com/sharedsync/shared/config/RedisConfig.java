@@ -3,7 +3,6 @@ package com.sharedsync.shared.config;
 import java.time.Duration;
 import java.util.Set;
 
-import org.reflections.Reflections;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.FactoryBean;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -220,14 +219,30 @@ public class RedisConfig implements ApplicationContextAware {
     }
 
     private static class RedisBeanDefinitionRegistryPostProcessor implements BeanDefinitionRegistryPostProcessor {
+
+        /** 생성된 sharedsync.dto.CacheDtoRegistry 에서 DTO 클래스를 읽는다. 없으면 빈 목록. */
+        private static java.util.List<Class<?>> generatedCacheDtos() {
+            try {
+                Class<?> registry = Class.forName("sharedsync.dto.CacheDtoRegistry");
+                String[] names = (String[]) registry.getField("DTO_CLASSES").get(null);
+                java.util.List<Class<?>> classes = new java.util.ArrayList<>(names.length);
+                for (String name : names) {
+                    classes.add(Class.forName(name));
+                }
+                return classes;
+            } catch (ClassNotFoundException e) {
+                // @CacheEntity 가 없는 앱이다. 등록할 DTO 템플릿도 없다.
+                return java.util.List.of();
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("생성된 CacheDtoRegistry 를 읽을 수 없다", e);
+            }
+        }
         @Override
         public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException {
-            // Only scan sharedsync.dto for @Cache-annotated DTOs
-            Reflections reflections = new Reflections("sharedsync.dto");
-            Set<Class<?>> cacheDtos = reflections.getTypesAnnotatedWith(Cache.class);
-
-            for (Class<?> dtoClass : cacheDtos) {
-                if (!CacheDto.class.isAssignableFrom(dtoClass)) {
+            // 목록은 컴파일 시점에 확정된다. 런타임 패키지 스캔은 그 사실을 다시 알아내려고
+            // 클래스패스를 훑는 일이었고, 그것 하나 때문에 소비 앱에 reflections 가 얹혔다.
+            for (Class<?> dtoClass : generatedCacheDtos()) {
+                if (!CacheDto.class.isAssignableFrom(dtoClass) || !dtoClass.isAnnotationPresent(Cache.class)) {
                     continue;
                 }
 

@@ -17,7 +17,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedsync.shared.auth.AuthenticationTokenResolver;
 import com.sharedsync.shared.auth.JwtHandshakeInterceptor;
 import com.sharedsync.shared.codec.SyncCodec;
-import com.sharedsync.shared.context.FrameworkContext;
 import com.sharedsync.shared.history.HistoryService;
 import com.sharedsync.shared.id.IdPoolService;
 import com.sharedsync.shared.listener.CacheInitializer;
@@ -61,12 +60,6 @@ public class SharedSyncCoreConfig {
     // ==========================================
     // 컨텍스트 / 프레즌스
     // ==========================================
-
-    @Bean
-    @ConditionalOnMissingBean
-    public FrameworkContext frameworkContext() {
-        return new FrameworkContext();
-    }
 
     @Bean
     @ConditionalOnMissingBean

@@ -1,12 +1,14 @@
 package com.sharedsync.shared.transport;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.PongMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.SubProtocolCapable;
 import org.springframework.web.socket.handler.BinaryWebSocketHandler;
 
 import com.sharedsync.shared.auth.SyncAccessValidator;
@@ -38,9 +40,12 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 @RequiredArgsConstructor
-public class SyncWebSocketHandler extends BinaryWebSocketHandler {
+public class SyncWebSocketHandler extends BinaryWebSocketHandler implements SubProtocolCapable {
 
     private static final String USER_ID = "userId";
+
+    /** 클라이언트가 토큰과 함께 제시하는 프로토콜. 서버는 이쪽만 골라 응답한다. */
+    private static final String SUB_PROTOCOL = "sharedsync.v1";
 
     private final WebSocketSessionRegistry registry;
     private final ProtoFrameDecoder decoder;
@@ -53,6 +58,13 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
     private final SyncMetrics metrics;
     /** 앱이 제공하지 않으면 인가 없이 통과한다 (auth.enabled=false 데모 모드와 같은 취급). */
     private final ObjectProvider<SyncAccessValidator> accessValidator;
+
+    @Override
+    public List<String> getSubProtocols() {
+        // 이 목록을 비워두면 클라이언트가 제시한 프로토콜 중 아무것도 고르지 못해 브라우저가
+        // 핸드셰이크를 실패로 처리한다 — 토큰을 프로토콜로 보내는 순간 연결 자체가 끊긴다.
+        return List.of(SUB_PROTOCOL);
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {

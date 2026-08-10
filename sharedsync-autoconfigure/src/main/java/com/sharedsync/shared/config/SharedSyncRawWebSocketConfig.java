@@ -6,7 +6,7 @@ import java.util.List;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
@@ -14,6 +14,7 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
+import org.springframework.web.socket.config.annotation.ServletWebSocketHandlerRegistry;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 
 import com.sharedsync.shared.auth.StompAccessValidator;
@@ -21,6 +22,8 @@ import com.sharedsync.shared.auth.StompAccessValidatorAdapter;
 import com.sharedsync.shared.auth.SyncAccessValidator;
 import com.sharedsync.shared.codec.ProtoFrameDecoder;
 import com.sharedsync.shared.codec.ProtoSyncCodec;
+import com.sharedsync.shared.codec.SyncDescriptors;
+import com.sharedsync.shared.sync.SyncChannel;
 import com.sharedsync.shared.codec.SyncCodec;
 import com.sharedsync.shared.controller.SyncDispatcher;
 import com.sharedsync.shared.listener.PresenceSessionManager;
@@ -45,7 +48,7 @@ import com.sharedsync.shared.transport.SyncTransport;
  */
 @Configuration
 @EnableWebSocket
-@ConditionalOnProperty(prefix = "sharedsync.websocket", name = "transport", havingValue = "websocket")
+@Conditional(TransportCondition.RawWebSocket.class)
 public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
 
     private final SharedSyncWebSocketProperties props;
@@ -64,10 +67,18 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
-        registry.addHandler(handler, props.getEndpoint())
+        registry.addHandler(handler, props.rawWebSocketEndpoint())
                 .setAllowedOrigins(props.getAllowedOrigins().toArray(new String[0]))
                 .addInterceptors(handshakeInterceptors.toArray(new HandshakeInterceptor[0]));
         // SockJS 는 붙이지 않는다. 텍스트 프레임만 보낼 수 있어 바이너리 wire 와 양립하지 않는다.
+
+        if (props.isBoth() && registry instanceof ServletWebSocketHandlerRegistry servletRegistry) {
+            // both 모드에서 STOMP 엔드포인트는 SockJS 를 켠 채로 남는다(구버전 클라이언트가 쓴다).
+            // SockJS 는 "/ws/**" 를 통째로 잡으므로, 그 아래에 있는 raw WS 경로("/ws/v2")가
+            // SockJS 의 알 수 없는 transport 로 해석되어 404 가 된다.
+            // raw 매핑을 먼저 보게 해서 정확히 일치하는 경로가 이기도록 한다.
+            servletRegistry.setOrder(0);
+        }
     }
 
     /**
@@ -100,8 +111,17 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
     }
 
     @Bean
-    public SyncTransport webSocketSyncTransport(WebSocketSessionRegistry registry) {
-        return new WebSocketSyncTransport(registry);
+    public SyncChannel webSocketSyncChannel(WebSocketSessionRegistry registry, SyncCodec codec) {
+        return new SyncChannel(SyncChannel.WEBSOCKET, new WebSocketSyncTransport(registry),
+                rawWebSocketCodec(codec));
+    }
+
+    /**
+     * raw WS 채널의 codec 은 언제나 protobuf 다. both 모드에서는 전역 codec 이 STOMP 용(json)일 수
+     * 있으므로, 여기서 필요하면 직접 만든다.
+     */
+    private SyncCodec rawWebSocketCodec(SyncCodec global) {
+        return global instanceof ProtoSyncCodec ? global : new ProtoSyncCodec(new SyncDescriptors());
     }
 
     @Bean
@@ -111,7 +131,7 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
 
     @Bean
     public ProtoFrameDecoder protoFrameDecoder(SyncCodec codec) {
-        return new ProtoFrameDecoder(requireProtoCodec(codec).getDescriptors());
+        return new ProtoFrameDecoder(((ProtoSyncCodec) rawWebSocketCodec(codec)).getDescriptors());
     }
 
     @Bean
@@ -127,7 +147,7 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
             SyncFrameExecutor frameExecutor,
             ObjectProvider<SyncMetrics> metrics
     ) {
-        return new SyncWebSocketHandler(registry, decoder, requireProtoCodec(codec), dispatcher,
+        return new SyncWebSocketHandler(registry, decoder, (ProtoSyncCodec) rawWebSocketCodec(codec), dispatcher,
                 presenceSessionManager, presenceRootResolver, authProperties, frameExecutor,
                 metrics.getIfAvailable(() -> SyncMetrics.NOOP), accessValidator);
     }
@@ -163,13 +183,4 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
         return new WebSocketPingScheduler(registry, props);
     }
 
-    private static ProtoSyncCodec requireProtoCodec(SyncCodec codec) {
-        if (codec instanceof ProtoSyncCodec proto) {
-            return proto;
-        }
-        throw new IllegalStateException(
-                "sharedsync.websocket.transport=websocket 은 codec=protobuf 를 전제한다. "
-                        + "현재 코덱: " + codec.getClass().getName()
-                        + " — raw WS 프레임은 ClientFrame/ServerFrame 이라 JSON 코덱으로는 해석할 수 없다.");
-    }
 }

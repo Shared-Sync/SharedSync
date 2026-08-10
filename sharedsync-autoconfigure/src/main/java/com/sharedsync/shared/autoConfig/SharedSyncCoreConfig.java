@@ -37,7 +37,6 @@ import com.sharedsync.shared.sync.CacheSyncService;
 import com.sharedsync.shared.sync.PeriodicSyncScheduler;
 import com.sharedsync.shared.sync.RedisSyncService;
 import com.sharedsync.shared.transport.SyncSessionContext;
-import com.sharedsync.shared.transport.SyncTransport;
 
 /**
  * 프레임워크 내부 빈들의 명시적 배선.
@@ -114,10 +113,11 @@ public class SharedSyncCoreConfig {
             PresenceRootResolver presenceRootResolver,
             SharedSyncAuthProperties authProperties,
             SharedSyncPresenceProperties presenceProperties,
-            SharedSyncWebSocketProperties webSocketProperties) {
+            SharedSyncWebSocketProperties webSocketProperties,
+            ObjectProvider<com.sharedsync.shared.transport.WebSocketSessionRegistry> webSocketSessionRegistry) {
         return new PresenceSessionManager(presenceStorage, presenceBroadcaster, userProvider, cacheInitializer,
                 cacheSyncService, historyService, presenceRootResolver, authProperties, presenceProperties,
-                webSocketProperties);
+                webSocketProperties, webSocketSessionRegistry);
     }
 
     // ==========================================
@@ -159,10 +159,12 @@ public class SharedSyncCoreConfig {
     public RedisSyncService redisSyncService(
             @Lazy @Qualifier("redisSyncTemplate")
             RedisTemplate<String, com.sharedsync.shared.sync.RedisSyncMessage> redisSyncTemplate,
-            SyncTransport transport,
-            SyncCodec codec,
+            List<com.sharedsync.shared.sync.SyncChannel> channels,
             SharedSyncWebSocketProperties props) {
-        return new RedisSyncService(redisSyncTemplate, transport, codec, props);
+        if (channels.isEmpty()) {
+            throw new IllegalStateException("전송 채널이 하나도 없다. sharedsync.websocket.transport 설정을 확인할 것.");
+        }
+        return new RedisSyncService(redisSyncTemplate, channels, props);
     }
 
     /**

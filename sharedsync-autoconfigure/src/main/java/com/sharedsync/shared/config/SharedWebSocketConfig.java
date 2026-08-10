@@ -4,7 +4,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
@@ -30,8 +30,13 @@ import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncPresenceProperties;
 import com.sharedsync.shared.listener.PresenceSessionManager;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sharedsync.shared.codec.JsonSyncCodec;
+import com.sharedsync.shared.codec.ProtoSyncCodec;
+import com.sharedsync.shared.codec.SyncCodec;
+import com.sharedsync.shared.codec.SyncDescriptors;
+import com.sharedsync.shared.sync.SyncChannel;
 import com.sharedsync.shared.transport.StompSyncTransport;
-import com.sharedsync.shared.transport.SyncTransport;
 
 /**
  * STOMP 전송 계층(기본). {@code sharedsync.websocket.transport=websocket} 이면 통째로 꺼지고
@@ -39,8 +44,7 @@ import com.sharedsync.shared.transport.SyncTransport;
  */
 @Configuration
 @EnableWebSocketMessageBroker
-@ConditionalOnProperty(prefix = "sharedsync.websocket", name = "transport",
-        havingValue = "stomp", matchIfMissing = true)
+@Conditional(TransportCondition.Stomp.class)
 public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final SharedSyncWebSocketProperties props;
@@ -85,8 +89,15 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
      * STOMP transport. raw WS 모드에서는 SimpMessagingTemplate 자체가 없으므로 이 설정과 함께 꺼진다.
      */
     @Bean
-    public SyncTransport stompSyncTransport(SimpMessagingTemplate messagingTemplate) {
-        return new StompSyncTransport(messagingTemplate);
+    public SyncChannel stompSyncChannel(SimpMessagingTemplate messagingTemplate,
+                                        ObjectMapper objectMapper,
+                                        SharedSyncWebSocketProperties props) {
+        // both 모드에서 STOMP 채널은 항상 JSON 이다. 구버전 클라이언트를 그대로 받는 것이 목적이라
+        // 이쪽 wire 를 바꾸면 의미가 없다.
+        SyncCodec codec = props.isBoth() || !props.isProtobuf()
+                ? new JsonSyncCodec(objectMapper)
+                : new ProtoSyncCodec(new SyncDescriptors());
+        return new SyncChannel(SyncChannel.STOMP, new StompSyncTransport(messagingTemplate), codec);
     }
 
     /**

@@ -12,7 +12,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -39,13 +38,16 @@ class RedisSyncServiceTest {
     @Mock
     private SharedSyncWebSocketProperties props;
 
-    @InjectMocks
     private RedisSyncService redisSyncService;
 
     @BeforeEach
     void stubCodec() {
         lenient().when(codec.encode(any())).thenReturn(ENCODED);
         lenient().when(codec.contentType()).thenReturn(MimeTypeUtils.APPLICATION_JSON);
+        // codec 과 transport 는 짝(SyncChannel)으로 움직인다. 채널을 여러 개 두면 STOMP+JSON 과
+        // raw WS+protobuf 를 동시에 서비스할 수 있다.
+        redisSyncService = new RedisSyncService(redisSyncTemplate,
+                java.util.List.of(new SyncChannel(SyncChannel.STOMP, transport, codec)), props);
     }
 
     private void redisSync(boolean enabled) {

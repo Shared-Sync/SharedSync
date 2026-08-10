@@ -28,6 +28,17 @@ ETag: "bd10658a6fc4ea46"
 
 ---
 
+## 1-1. 전환 기간 (`transport=both`)
+
+서버가 두 전송을 동시에 서비스하는 동안에는 raw WebSocket 이 **별도 경로**로 뜬다
+(기본값 `<endpoint>/v2`, 예: `/ws/v2`). STOMP 엔드포인트는 SockJS 를 켠 채로 그대로 남기 때문에
+같은 경로를 쓸 수 없다 — SockJS 가 `/ws/**` 를 통째로 잡는다.
+
+두 채널은 같은 룸을 공유한다. 구버전 클라이언트가 만든 편집이 protobuf 로도 나가고, 그 반대도
+성립한다. 전환이 끝나면 서버가 `transport=websocket` 으로 내려가고 경로는 `<endpoint>` 로 돌아온다.
+
+---
+
 ## 2. 연결
 
 ```js

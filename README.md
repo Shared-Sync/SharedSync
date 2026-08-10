@@ -52,7 +52,8 @@ dependencies {
 
 | Property | 기본값 | 설명 |
 | :--- | :--- | :--- |
-| `transport` | `stomp` | `stomp`(현행) 또는 `websocket`(raw WebSocket + protobuf 바이너리 프레임) |
+| `transport` | `stomp` | `stomp`(현행) / `websocket`(raw WS + protobuf) / `both`(둘 동시 — 무중단 전환용) |
+| `websocket-endpoint` | `<endpoint>/v2` | `both` 모드에서 raw WebSocket 이 뜰 경로 |
 | `codec` | `json` | `json` 또는 `protobuf`. **transport=websocket 이면 자동으로 protobuf 가 된다** |
 | `sockjs` | `true` | SockJS 폴백. **codec=protobuf 이면 자동으로 꺼진다**(바이너리 프레임과 양립 불가) |
 | `endpoint` | `/ws-sharedsync` | WebSocket 연결 경로 |
@@ -65,8 +66,13 @@ dependencies {
 | `redis-sync.enabled` | `false` | Redis Pub/Sub 서버 간 동기화 |
 | `redis-sync.channel` | `sharedsync:websocket:sync` | 동기화 채널명 |
 
-**protobuf 로 바꿀 때 앱이 할 일은 `transport: websocket` 한 줄이다.** codec 과 sockjs 는
-프레임워크가 맞춘다(서로 성립하지 않는 조합이 있는데, 그걸 아는 것은 프레임워크의 몫이다).
+**protobuf 로 바꿀 때 앱이 할 일은 `transport` 한 줄이다.** codec 과 sockjs 는 프레임워크가
+맞춘다(서로 성립하지 않는 조합이 있는데, 그걸 아는 것은 프레임워크의 몫이다).
+
+전환은 `both` 로 한다. STOMP+JSON 과 raw WS+protobuf 가 **같은 룸을 공유**하므로, 구버전
+클라이언트가 남아 있는 동안 새 클라이언트를 배포할 수 있다. 웹과 앱의 배포 시점이 다르고 앱은
+사용자가 업데이트해야 하므로, "모든 클라이언트를 같은 순간에 바꾸기"는 실제로는 불가능한 요구다.
+모두 옮겨간 뒤 `websocket` 으로 내리면 된다.
 
 ### 사용자 상태 관리 (`sharedsync.presence`)
 

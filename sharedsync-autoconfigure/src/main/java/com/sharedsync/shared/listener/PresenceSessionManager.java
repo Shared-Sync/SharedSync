@@ -19,6 +19,7 @@ import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncPresenceProperties;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.storage.PresenceStorage;
+import com.sharedsync.shared.transport.WebSocketSessionRegistry;
 import com.sharedsync.shared.sync.CacheSyncService;
 
 import jakarta.annotation.PreDestroy;
@@ -43,6 +44,8 @@ public class PresenceSessionManager {
     private final SharedSyncAuthProperties authProperties;
     private final SharedSyncPresenceProperties presenceProperties;
     private final SharedSyncWebSocketProperties webSocketProperties;
+    /** raw WS 전송이 꺼져 있으면 이 빈은 없다. */
+    private final org.springframework.beans.factory.ObjectProvider<WebSocketSessionRegistry> webSocketSessionRegistry;
 
     // 현재 서버 인스턴스에서 관리 중인 세션 목록
     private final java.util.Set<String> localSessions = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -105,7 +108,9 @@ public class PresenceSessionManager {
         // 지연의 이유는 STOMP 의 구독 경합이다: SUBSCRIBE 프레임을 서버가 처리 중일 때 보낸 메시지는
         // 구독 등록 전이라 그대로 버려질 수 있어서, 클라이언트 쪽 처리가 끝나길 기다렸다.
         // raw WebSocket 에는 구독이라는 단계가 없다 — Join 을 받은 시점에 세션은 이미 룸에 있다.
-        long delay = webSocketProperties.isRawWebSocket() ? 0L : presenceProperties.getBroadcastDelay();
+        // 지연은 STOMP 세션에만 필요하다. transport=both 면 세션마다 갈린다 — raw WS 레지스트리에
+        // 있는 세션이면 이미 룸에 들어와 있으므로 기다릴 이유가 없다.
+        long delay = isRawWebSocketSession(sessionId) ? 0L : presenceProperties.getBroadcastDelay();
         Runnable sendInitial = () -> {
             try {
                 log.debug("[PresenceManager] Sending initial message to session: sessionId={}", sessionId);
@@ -119,6 +124,17 @@ public class PresenceSessionManager {
         } else {
             CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(sendInitial);
         }
+    }
+
+    private boolean isRawWebSocketSession(String sessionId) {
+        if (!webSocketProperties.isRawWebSocket()) {
+            return false;
+        }
+        if (!webSocketProperties.isBoth()) {
+            return true;
+        }
+        WebSocketSessionRegistry registry = webSocketSessionRegistry.getIfAvailable();
+        return registry != null && registry.session(sessionId) != null;
     }
 
     /**

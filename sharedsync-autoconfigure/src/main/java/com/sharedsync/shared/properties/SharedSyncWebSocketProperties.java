@@ -39,11 +39,26 @@ public class SharedSyncWebSocketProperties {
     private String codec = "json";
 
     /**
-     * 전송 계층. stomp(기본, 현행) | websocket(raw WebSocket + 바이너리 프레임)
+     * 전송 계층.
      *
-     * 이것만 바꾸면 된다. codec 과 sockjs 는 normalize() 가 맞춘다.
+     * <ul>
+     *   <li>{@code stomp} (기본, 현행) — STOMP + JSON</li>
+     *   <li>{@code websocket} — raw WebSocket + protobuf. 기존 클라이언트는 못 붙는다.</li>
+     *   <li>{@code both} — 둘을 동시에 서비스한다. 구버전 클라이언트가 남아 있는 동안 새
+     *       클라이언트를 배포할 수 있다(무중단 전환). raw WS 는 {@link #websocketEndpoint} 로 뜬다.</li>
+     * </ul>
+     *
+     * 이것만 정하면 된다. codec 과 sockjs 는 normalize() 가 맞춘다.
      */
     private String transport = "stomp";
+
+    /**
+     * both 모드에서 raw WebSocket 이 뜰 경로. 기본값은 endpoint + "/v2".
+     *
+     * STOMP 와 같은 경로를 쓸 수 없다 — 핸들러가 둘이면 어느 쪽이 잡을지 정할 방법이 없다.
+     * 기본값을 endpoint 하위로 둔 이유는 앱의 시큐리티 화이트리스트("/ws/**")가 그대로 덮기 때문이다.
+     */
+    private String websocketEndpoint = "";
 
     /**
      * raw WebSocket 모드에서 서버가 보내는 ping 주기(초). 0 이면 보내지 않는다.
@@ -104,6 +119,22 @@ public class SharedSyncWebSocketProperties {
      */
     @PostConstruct
     public void normalize() {
+        if (isBoth()) {
+            // 두 채널이 각자 자기 codec 을 쓴다(STOMP=json, raw WS=protobuf). 전역 codec 설정은
+            // STOMP 쪽에만 적용되므로 여기서 손대지 않는다.
+            if (websocketEndpoint == null || websocketEndpoint.isBlank()) {
+                websocketEndpoint = endpoint + "/v2";
+            }
+            if (isProtobuf()) {
+                log.info("[SharedSync] transport=both 에서는 STOMP 채널이 codec={} 를 쓴다. "
+                        + "raw WS 채널은 항상 protobuf 다.", codec);
+            }
+            if (schemaPath == null || schemaPath.isBlank()) {
+                schemaPath = endpoint + "/schema.proto";
+            }
+            return;
+        }
+
         if (isRawWebSocket() && !isProtobuf()) {
             // raw WS 프레임은 ClientFrame/ServerFrame 이라 JSON 코덱으로는 인바운드를 해석할 수 없다.
             log.info("[SharedSync] transport=websocket 이므로 codec 을 protobuf 로 맞춘다 (설정값: {})", codec);
@@ -119,8 +150,23 @@ public class SharedSyncWebSocketProperties {
         }
     }
 
+    /** raw WebSocket 핸들러가 필요한가 (websocket 또는 both). */
     public boolean isRawWebSocket() {
-        return "websocket".equalsIgnoreCase(transport);
+        return "websocket".equalsIgnoreCase(transport) || isBoth();
+    }
+
+    /** STOMP 브로커가 필요한가 (stomp 또는 both). */
+    public boolean isStomp() {
+        return !"websocket".equalsIgnoreCase(transport);
+    }
+
+    public boolean isBoth() {
+        return "both".equalsIgnoreCase(transport);
+    }
+
+    /** raw WebSocket 이 실제로 뜰 경로. both 면 별도 경로, 아니면 endpoint 그대로. */
+    public String rawWebSocketEndpoint() {
+        return isBoth() ? websocketEndpoint : endpoint;
     }
 
     public boolean isProtobuf() {

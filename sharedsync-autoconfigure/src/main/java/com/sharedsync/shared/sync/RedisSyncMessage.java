@@ -35,4 +35,14 @@ public class RedisSyncMessage {
 
     /** targetSessionId 가 있을 때 대상 사용자 ID. */
     private String targetUserId;
+
+    /**
+     * 이 바이트를 만든 채널의 이름(stomp/websocket).
+     *
+     * 수신 인스턴스는 같은 이름의 채널로만 내보내야 한다. 바이트가 그 채널의 codec 으로
+     * 인코딩돼 있어서, 다른 채널로 보내면 JSON 을 기대하는 클라이언트에 protobuf 가 간다.
+     * 채널이 하나뿐이던 시절의 메시지(값 없음)는 모든 채널로 보낸다 — 롤링 배포 중 구버전
+     * 인스턴스가 발행한 메시지가 그렇다.
+     */
+    private String channel;
 }

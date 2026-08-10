@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.util.UUID;
@@ -51,6 +52,39 @@ public class AutoCacheRepositoryCharacterizationTest {
         field.setAccessible(true);
         field.set(repository, applicationContext);
         return repository;
+    }
+
+    // ===== CacheStore 해석 =====
+
+    @Test
+    void cacheStore_isResolvedOnceAndReused() throws Exception {
+        UuidRepository repo = inject(new UuidRepository());
+
+        Object first = repo.exposeCacheStore();
+        Object second = repo.exposeCacheStore();
+
+        assertThat(second).as("빈 구성은 기동 후 바뀌지 않는데 캐시 연산마다 다시 조회하고 있었다")
+                .isSameAs(first);
+        verify(applicationContext, times(1)).getBean("globalCacheStore");
+    }
+
+    @Test
+    void cacheStore_fallbackKeepsTheSameInstance() throws Exception {
+        UuidRepository repo = new UuidRepository();
+        lenient().when(applicationContext.containsBean(anyString())).thenReturn(false);
+        lenient().when(applicationContext.getBean(anyString()))
+                .thenThrow(new IllegalStateException("no redis"));
+        java.lang.reflect.Field field = AutoCacheRepository.class.getDeclaredField("applicationContext");
+        field.setAccessible(true);
+        field.set(repo, applicationContext);
+
+        Object first = repo.exposeCacheStore();
+        Object second = repo.exposeCacheStore();
+
+        // 예전에는 폴백 경로가 호출마다 **빈** InMemoryCacheStore 를 새로 만들어서,
+        // 저장한 값이 다음 호출에서 사라졌다. 조회는 성공하고 결과만 비어 있었다.
+        assertThat(second).as("폴백 저장소가 호출마다 새로 만들어지면 아무것도 캐시되지 않는다")
+                .isSameAs(first);
     }
 
     // ===== 캐시 키 포맷 (메타데이터/keyspace) =====
@@ -189,6 +223,10 @@ public class AutoCacheRepositoryCharacterizationTest {
     }
 
     public static class UuidRepository extends AutoCacheRepository<UuidEntity, UUID, UuidDto> {
+        /** getCacheStore 는 protected 라 테스트에서 열어준다. */
+        Object exposeCacheStore() {
+            return getCacheStore();
+        }
     }
 
     public static class LongEntity {

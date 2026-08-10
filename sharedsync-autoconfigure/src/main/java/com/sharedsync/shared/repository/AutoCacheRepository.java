@@ -60,6 +60,12 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     @Autowired
     private ApplicationContext applicationContext;
 
+    /** 한 번 해석한 CacheStore. 빈 구성은 기동 후 바뀌지 않는다. */
+    private volatile CacheStore<DTO> cacheStore;
+
+    /** 한 번 해석한 PresenceStorage. 예전에는 findById 마다 타입으로 빈을 찾았다. */
+    private volatile PresenceStorage presenceStorage;
+
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -317,9 +323,28 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
 
     /**
      * CacheStore를 반환합니다. Redis 또는 InMemory 구현체가 사용됩니다.
+     *
+     * 한 번 해석하고 캐싱한다. 빈 구성은 기동 후 바뀌지 않는데(동적 RedisTemplate 들도
+     * BeanDefinitionRegistryPostProcessor 가 기동 시점에 등록한다) 예전에는 캐시 연산마다
+     * containsBean/getBean 을 최대 세 번씩 했다. 게다가 마지막 폴백은 **호출마다 빈 InMemory
+     * 저장소를 새로 만들어** 저장한 값이 다음 호출에서 사라졌다.
      */
-    @SuppressWarnings("unchecked")
     protected final CacheStore<DTO> getCacheStore() {
+        CacheStore<DTO> resolved = cacheStore;
+        if (resolved == null) {
+            synchronized (this) {
+                resolved = cacheStore;
+                if (resolved == null) {
+                    resolved = resolveCacheStore();
+                    cacheStore = resolved;
+                }
+            }
+        }
+        return resolved;
+    }
+
+    @SuppressWarnings("unchecked")
+    private CacheStore<DTO> resolveCacheStore() {
         // 먼저 CacheStore 빈이 있는지 확인 (인메모리 또는 커스텀)
         String cacheStoreBeanName = cacheKeyPrefix + "CacheStore";
         if (applicationContext.containsBean(cacheStoreBeanName)) {
@@ -904,12 +929,22 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     public boolean isLoading(Object id) {
         if (id == null)
             return false;
-        try {
-            PresenceStorage presenceStorage = applicationContext.getBean(PresenceStorage.class);
-            return presenceStorage.isLoading(id.toString());
-        } catch (Exception e) {
-            return false;
+        PresenceStorage storage = presenceStorage();
+        return storage != null && storage.isLoading(id.toString());
+    }
+
+    /** 없을 수도 있다(프레즌스를 쓰지 않는 앱). 그 경우 적재 대기 자체가 성립하지 않는다. */
+    private PresenceStorage presenceStorage() {
+        PresenceStorage resolved = presenceStorage;
+        if (resolved == null) {
+            try {
+                resolved = applicationContext.getBean(PresenceStorage.class);
+                presenceStorage = resolved;
+            } catch (Exception e) {
+                return null;
+            }
         }
+        return resolved;
     }
 
     private void waitForLoading(Object id) {
@@ -920,11 +955,14 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
         if (CacheLoadingContext.isCurrentLoader(id))
             return;
 
+        PresenceStorage storage = presenceStorage();
+        if (storage == null) {
+            return;
+        }
         try {
-            PresenceStorage presenceStorage = applicationContext.getBean(PresenceStorage.class);
             // 최대 5초 대기 (500ms * 10회)
             for (int i = 0; i < 10; i++) {
-                if (!presenceStorage.isLoading(id.toString())) {
+                if (!storage.isLoading(id.toString())) {
                     return;
                 }
                 if (i % 2 == 0) {

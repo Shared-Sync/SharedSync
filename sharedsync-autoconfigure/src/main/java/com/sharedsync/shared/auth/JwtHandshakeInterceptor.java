@@ -36,21 +36,48 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         try {
             String token = extractToken(request);
             if (token == null || token.isBlank()) {
-                response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
-                return false;
+                return reject(response, "토큰 없음", request);
             }
             if (!tokenResolver.validate(token)) {
-                response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
-                return false;
+                return reject(response, "토큰 검증 실패", request);
             }
 
             attributes.put("userId", tokenResolver.extractPrincipalId(token));
             return true;
 
         } catch (Exception e) {
-            response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
-            return false;
+            return reject(response, "토큰 처리 중 예외: " + e.getMessage(), request);
         }
+    }
+
+    /**
+     * 거부는 401 응답으로만 나가고 서버에는 아무 흔적도 남지 않았다. 클라이언트가 못 붙을 때
+     * "토큰이 없는 건지, 형식이 틀린 건지, 프록시가 헤더를 지운 건지"를 서버 쪽에서 알 방법이
+     * 없었다는 뜻이다 — 어디서 토큰을 찾았는지까지 함께 남긴다.
+     */
+    private boolean reject(ServerHttpResponse response, String reason, ServerHttpRequest request) {
+        response.setStatusCode(org.springframework.http.HttpStatus.UNAUTHORIZED);
+        log.warn("[SharedSync] WebSocket 핸드셰이크 거부 ({}). uri={} origin={} 토큰위치={}",
+                reason,
+                request.getURI().getPath(),
+                request.getHeaders().getFirst("Origin"),
+                tokenSource(request));
+        return false;
+    }
+
+    /** 어느 통로로 토큰이 왔는지. 전부 "없음"이면 프록시가 헤더를 지웠을 가능성이 있다. */
+    private String tokenSource(ServerHttpRequest request) {
+        if (request.getHeaders().getFirst("Authorization") != null) {
+            return "Authorization";
+        }
+        if (request.getHeaders().getFirst("Sec-WebSocket-Protocol") != null) {
+            return "Sec-WebSocket-Protocol";
+        }
+        String query = request.getURI().getQuery();
+        if (query != null && query.contains("token=")) {
+            return "query";
+        }
+        return "없음";
     }
 
     @Override

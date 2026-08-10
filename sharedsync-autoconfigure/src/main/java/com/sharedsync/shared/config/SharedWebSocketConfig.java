@@ -42,6 +42,7 @@ import com.sharedsync.shared.transport.StompSyncTransport;
  * STOMP 전송 계층(기본). {@code sharedsync.websocket.transport=websocket} 이면 통째로 꺼지고
  * {@link SharedSyncRawWebSocketConfig} 가 같은 endpoint 를 raw WebSocket 으로 잡는다.
  */
+@lombok.extern.slf4j.Slf4j
 @Configuration
 @EnableWebSocketMessageBroker
 @Conditional(TransportCondition.Stomp.class)
@@ -83,6 +84,8 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
         if (props.isSockjs()) {
             endpoint.withSockJS();
         }
+        log.info("[SharedSync] STOMP 활성화: endpoint={} sockjs={} allowed-origins={}",
+                props.getEndpoint(), props.isSockjs(), props.getAllowedOrigins());
     }
 
     /**

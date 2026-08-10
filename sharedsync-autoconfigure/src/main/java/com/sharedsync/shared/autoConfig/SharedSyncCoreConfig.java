@@ -16,6 +16,7 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedsync.shared.auth.AuthenticationTokenResolver;
 import com.sharedsync.shared.auth.JwtHandshakeInterceptor;
+import com.sharedsync.shared.auth.OriginLoggingInterceptor;
 import com.sharedsync.shared.codec.SyncCodec;
 import com.sharedsync.shared.history.HistoryService;
 import com.sharedsync.shared.id.IdPoolService;
@@ -185,6 +186,16 @@ public class SharedSyncCoreConfig {
     // ==========================================
     // 인증
     // ==========================================
+
+    /**
+     * Origin 불일치를 서버 로그에 남긴다. 막는 것은 Spring 이 하고, 여기서는 보이게만 한다 —
+     * 그동안은 403 만 나가고 서버에는 흔적이 없어 원인 판별이 불가능했다.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public OriginLoggingInterceptor originLoggingInterceptor(SharedSyncWebSocketProperties props) {
+        return new OriginLoggingInterceptor(props.getAllowedOrigins());
+    }
 
     /** 핸드셰이크 인증. 두 transport 모두 이 경로를 쓴다. */
     @Bean

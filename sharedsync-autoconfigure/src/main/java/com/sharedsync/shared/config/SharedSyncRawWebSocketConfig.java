@@ -46,6 +46,7 @@ import com.sharedsync.shared.transport.SyncTransport;
  * 이때 STOMP 쪽 {@link SharedWebSocketConfig} 는 반대 조건으로 꺼진다 — 같은 endpoint 경로를
  * 두 핸들러가 잡으면 안 되고, 브로커/컨버터 체인도 통째로 필요 없어진다.
  */
+@lombok.extern.slf4j.Slf4j
 @Configuration
 @EnableWebSocket
 @Conditional(TransportCondition.RawWebSocket.class)
@@ -71,6 +72,11 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
                 .setAllowedOrigins(props.getAllowedOrigins().toArray(new String[0]))
                 .addInterceptors(handshakeInterceptors.toArray(new HandshakeInterceptor[0]));
         // SockJS 는 붙이지 않는다. 텍스트 프레임만 보낼 수 있어 바이너리 wire 와 양립하지 않는다.
+
+        log.info("[SharedSync] raw WebSocket 활성화: endpoint={} allowed-origins={} ping={}s "
+                        + "max-frame={}B schema={}",
+                props.rawWebSocketEndpoint(), props.getAllowedOrigins(), props.getPingInterval(),
+                props.getMaxFrameSize(), props.getSchemaPath());
 
         if (props.isBoth() && registry instanceof ServletWebSocketHandlerRegistry servletRegistry) {
             // both 모드에서 STOMP 엔드포인트는 SockJS 를 켠 채로 남는다(구버전 클라이언트가 쓴다).

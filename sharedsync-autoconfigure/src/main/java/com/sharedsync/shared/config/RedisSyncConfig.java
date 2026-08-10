@@ -22,6 +22,7 @@ import com.sharedsync.shared.sync.RedisSyncService;
 
 import lombok.RequiredArgsConstructor;
 
+@lombok.extern.slf4j.Slf4j
 @Configuration
 @ConditionalOnProperty(name = "sharedsync.websocket.redis-sync.enabled", havingValue = "true")
 @RequiredArgsConstructor
@@ -76,7 +77,11 @@ public class RedisSyncConfig {
                     }
                     redisSyncService.handleMessage(syncMessage);
                 } catch (Exception e) {
-                    // 로깅 등 예외 처리
+                    // 여기서 삼키면 다중 인스턴스 환경에서 "다른 사람 화면에만 안 뜬다"가
+                    // 아무 신호 없이 발생한다. 이 인스턴스에 붙은 세션들은 그 편집을 영영 못 받는다.
+                    log.error("[SharedSync] Redis 동기화 메시지 처리 실패 (이 인스턴스의 세션들은 "
+                            + "해당 편집을 받지 못한다) type={}: {}",
+                            message == null ? "null" : message.getClass().getName(), e.getMessage(), e);
                 }
             }
         }, "handleMessage");

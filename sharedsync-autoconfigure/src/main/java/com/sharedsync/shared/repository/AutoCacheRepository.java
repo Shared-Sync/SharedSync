@@ -575,7 +575,10 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
         try {
             deleteCacheOnlyByParentId(parentId, parentClass);
         } catch (Exception e) {
-            // ignore or log
+            // 실패하면 지워졌어야 할 항목이 캐시에 남아 새 데이터와 섞인다. 삭제된 행이
+            // 화면에 계속 보이는 형태로만 드러나므로 최소한 흔적은 남긴다.
+            log.warn("[AutoCacheRepository] 부모 기준 캐시 삭제 실패 parentId={}: {}",
+                    parentId, e.getMessage());
         }
 
         // 3. 새 데이터 캐시에 저장
@@ -985,7 +988,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
                 }
             }
         } catch (Exception e) {
-            // ignore
+            log.debug("[AutoCacheRepository] 적재 대기 중 오류 id={}: {}", id, e.getMessage());
         }
     }
 

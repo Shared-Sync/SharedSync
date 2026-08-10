@@ -72,7 +72,7 @@ public class RedisSyncService {
             byte[] payload = message.getPayload();
             MimeType contentType = resolveContentType(message.getContentType());
 
-            log.info("Redis로부터 웹소켓 동기화 메시지 수신: destination={}, bytes={}, targetSessionId={}",
+            log.debug("Redis로부터 웹소켓 동기화 메시지 수신: destination={}, bytes={}, targetSessionId={}",
                     message.getDestination(),
                     payload != null ? payload.length : 0,
                     message.getTargetSessionId());

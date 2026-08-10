@@ -133,8 +133,10 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
      */
     @Bean
     @ConditionalOnMissingBean(SyncAccessValidator.class)
-    public SyncAccessValidator stompAccessValidatorAdapter(ObjectProvider<List<StompAccessValidator>> validators) {
-        return new StompAccessValidatorAdapter(validators.getIfAvailable(Collections::emptyList));
+    public SyncAccessValidator stompAccessValidatorAdapter(ObjectProvider<List<StompAccessValidator>> validators,
+                                                           SharedSyncAuthProperties authProperties) {
+        return new StompAccessValidatorAdapter(validators.getIfAvailable(Collections::emptyList),
+                authProperties.isDenyUnmatched());
     }
 
     @Bean

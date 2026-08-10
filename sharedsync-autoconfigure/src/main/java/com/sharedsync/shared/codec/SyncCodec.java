@@ -5,6 +5,10 @@ import org.springframework.util.MimeType;
 /**
  * 동기화 페이로드의 wire 인코딩 경계.
  *
+ * 아웃바운드 전용이다. 인바운드는 transport 마다 모양이 달라(STOMP 는 컨버터가 Map 을 만들고,
+ * raw WS 는 ProtoFrameDecoder 가 ClientFrame 을 만든다) 여기에 넣으면 한쪽 구현이 반드시
+ * UnsupportedOperationException 을 던지게 된다. 실제로 ProtoSyncCodec.decode 가 그랬다.
+ *
  * 인코딩은 publish 시점에 **한 번만** 수행하고 그 뒤로는 바이트로만 다룬다.
  * Redis 팬아웃 구간에서 페이로드가 다시 역직렬화되며 타입을 잃던 문제
  * (RedisSyncMessage.payload 가 Object 였을 때 LinkedHashMap 으로 퇴화)를 이 경계로 막는다.
@@ -15,11 +19,6 @@ public interface SyncCodec {
      * 페이로드를 wire 바이트로 인코딩한다.
      */
     byte[] encode(Object payload);
-
-    /**
-     * wire 바이트를 지정한 타입으로 디코딩한다.
-     */
-    <T> T decode(byte[] data, Class<T> type);
 
     /**
      * 이 코덱이 만들어내는 바이트의 content-type.

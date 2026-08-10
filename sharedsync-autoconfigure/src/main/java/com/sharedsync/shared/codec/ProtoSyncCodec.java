@@ -53,12 +53,6 @@ public class ProtoSyncCodec implements SyncCodec {
                         + " — SyncOutbound 로 감싸서 보낼 것");
     }
 
-    @Override
-    public <T> T decode(byte[] data, Class<T> type) {
-        throw new UnsupportedOperationException(
-                "인바운드 디코딩은 WS transport 의 디스패처가 ClientFrame 으로 직접 처리한다");
-    }
-
     /** 스키마 해시를 실어 보내는 최초 프레임. 클라이언트가 자기 해시와 비교한다. */
     public byte[] encodeHello() {
         Descriptor helloDesc = descriptors.message("Hello");

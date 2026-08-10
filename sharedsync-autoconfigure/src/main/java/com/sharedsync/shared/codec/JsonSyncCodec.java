@@ -69,18 +69,6 @@ public class JsonSyncCodec implements SyncCodec {
         return payload;
     }
 
-    @Override
-    public <T> T decode(byte[] data, Class<T> type) {
-        if (data == null || data.length == 0) {
-            return null;
-        }
-        try {
-            return objectMapper.readValue(data, type);
-        } catch (Exception e) {
-            throw new IllegalStateException("JSON 디코딩 실패: type=" + type.getName()
-                    + " body=" + new String(data, StandardCharsets.UTF_8), e);
-        }
-    }
 
     @Override
     public MimeType contentType() {

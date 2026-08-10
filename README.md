@@ -143,6 +143,9 @@ public class RoomAccessValidator implements SyncAccessValidator {
 2. `Sec-WebSocket-Protocol: sharedsync.v1, bearer.<token>` — 브라우저
 3. `?token=<token>` — 하위 호환. **URL 은 액세스 로그에 남으므로 권장하지 않는다**
 
+> raw WebSocket + protobuf 전송의 클라이언트 계약(프레임 순서, 에러 코드, 백프레셔, 스키마 협상)은
+> [docs/wire-protocol.md](docs/wire-protocol.md) 에 있다.
+
 ### 3. 프레임워크가 제공하는 것
 
 - `SharedSyncController` — 편집 메시지 디스패치(STOMP `@MessageMapping` + raw WS 양쪽)

@@ -10,9 +10,7 @@ import org.springframework.stereotype.Component;
 
 import lombok.extern.slf4j.Slf4j;
 
-@Component
 @Slf4j
-@ConditionalOnProperty(name = "sharedsync.cache.type", havingValue = "redis")
 public class RedisPresenceStorage implements PresenceStorage {
 
     private final RedisTemplate<String, Object> redis;

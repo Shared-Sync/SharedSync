@@ -18,24 +18,30 @@ import com.sharedsync.shared.repository.AutoCacheRepository;
 import com.sharedsync.shared.sync.RedisSyncService;
 import com.sharedsync.shared.transport.SyncSessionContext;
 
-@Service
 public class HistoryService {
 
-    @Autowired(required = false)
-    @Qualifier("presenceRedis")
-    private RedisTemplate<String, Object> redisTemplate;
+    // 생성자 주입. 필드 주입이면 이 클래스를 테스트에서 그냥 new 할 수 없고, 어떤 의존이
+    // 선택적인지(redisTemplate) 시그니처에 드러나지도 않는다.
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final List<AutoCacheRepository<?, ?, ?>> repositories;
+    private final RedisSyncService redisSyncService;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final SyncSessionContext sessionContext;
 
-    @Autowired
-    private List<AutoCacheRepository<?, ?, ?>> repositories;
-
-    @Autowired
-    private RedisSyncService redisSyncService;
-
-    @Autowired
-    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
-
-    @Autowired
-    private SyncSessionContext sessionContext;
+    /**
+     * @param redisTemplate presenceRedis. 없으면 히스토리만 비활성화되고 편집은 그대로 동작한다.
+     */
+    public HistoryService(RedisTemplate<String, Object> redisTemplate,
+                          List<AutoCacheRepository<?, ?, ?>> repositories,
+                          RedisSyncService redisSyncService,
+                          com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                          SyncSessionContext sessionContext) {
+        this.redisTemplate = redisTemplate;
+        this.repositories = repositories;
+        this.redisSyncService = redisSyncService;
+        this.objectMapper = objectMapper;
+        this.sessionContext = sessionContext;
+    }
 
     private static final ThreadLocal<Boolean> SKIP_HISTORY = ThreadLocal.withInitial(() -> false);
 

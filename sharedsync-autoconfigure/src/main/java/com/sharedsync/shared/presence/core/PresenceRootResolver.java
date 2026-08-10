@@ -9,7 +9,6 @@ import com.sharedsync.shared.presence.annotation.PresenceRoot;
 
 import java.util.Set;
 
-@Component
 public class PresenceRootResolver {
 
     private String channelName;
@@ -25,6 +24,12 @@ public class PresenceRootResolver {
 
         if (roots.isEmpty())
             throw new IllegalStateException("No @PresenceRoot found");
+        if (roots.size() > 1) {
+            // 예전에는 iterator().next() 로 아무거나 골랐다. 어느 것이 뽑혔는지에 따라 프레즌스
+            // 채널 이름이 달라지므로, 배포마다 다른 목적지를 쓰게 될 수도 있었다.
+            throw new IllegalStateException("@PresenceRoot 는 하나여야 한다. 발견된 것: "
+                    + roots.stream().map(Class::getName).sorted().toList());
+        }
 
         rootType = roots.iterator().next();
         PresenceRoot ann = rootType.getAnnotation(PresenceRoot.class);

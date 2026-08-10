@@ -10,7 +10,6 @@ import com.sharedsync.shared.sync.RedisSyncService;
 
 import lombok.RequiredArgsConstructor;
 
-@Component
 @RequiredArgsConstructor
 public class PresenceBroadcaster {
 

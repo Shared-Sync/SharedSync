@@ -12,7 +12,6 @@ import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 
 import lombok.RequiredArgsConstructor;
 
-@Component
 @RequiredArgsConstructor
 public class JwtHandshakeInterceptor implements HandshakeInterceptor {
 

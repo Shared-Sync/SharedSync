@@ -13,7 +13,6 @@ import com.sharedsync.shared.presence.annotation.PresenceUser;
 
 import jakarta.annotation.PostConstruct;
 
-@Component
 public class PresenceUserRegistry {
 
     private Class<?> userClass;

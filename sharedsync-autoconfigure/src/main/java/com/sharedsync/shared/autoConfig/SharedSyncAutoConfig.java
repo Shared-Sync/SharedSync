@@ -16,6 +16,7 @@ import com.sharedsync.shared.codec.JsonSyncCodec;
 import com.sharedsync.shared.codec.ProtoSyncCodec;
 import com.sharedsync.shared.codec.SyncDescriptors;
 import com.sharedsync.shared.codec.SyncCodec;
+import com.sharedsync.shared.config.InMemoryCacheConfig;
 import com.sharedsync.shared.config.RedisConfig;
 import com.sharedsync.shared.config.RedisSyncConfig;
 import com.sharedsync.shared.config.SharedSyncRawWebSocketConfig;
@@ -28,9 +29,12 @@ import com.sharedsync.shared.transport.SyncSessionContext;
 @Configuration
 @EnableConfigurationProperties(SharedSyncWebSocketProperties.class)
 @EnableScheduling
-@Import({RedisConfig.class, RedisSyncConfig.class, SharedWebSocketConfig.class,
-        SharedSyncRawWebSocketConfig.class})
-@ComponentScan(basePackages = {"sharedsync", "com.sharedsync"})
+@Import({SharedSyncCoreConfig.class, InMemoryCacheConfig.class, RedisConfig.class, RedisSyncConfig.class,
+        SharedWebSocketConfig.class, SharedSyncRawWebSocketConfig.class})
+// 생성 코드만 스캔한다. 프레임워크 내부 빈은 SharedSyncCoreConfig 가 명시적으로 배선한다 —
+// 자동 설정에서 자기 패키지를 스캔하면 조건부 배선이 불가능해지고, 앱이 같은 패키지를 스캔할 때
+// 빈이 두 벌 생긴다.
+@ComponentScan(basePackages = "sharedsync")
 public class SharedSyncAutoConfig {
 
     /**

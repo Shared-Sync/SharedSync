@@ -12,8 +12,6 @@ import org.springframework.stereotype.Component;
  * 인메모리 기반 PresenceStorage 구현체.
  * 단일 인스턴스 환경에 적합합니다.
  */
-@Component
-@ConditionalOnProperty(name = "sharedsync.cache.type", havingValue = "memory", matchIfMissing = true)
 public class InMemoryPresenceStorage implements PresenceStorage {
 
     // rootId -> Map<userId//sessionId, index>

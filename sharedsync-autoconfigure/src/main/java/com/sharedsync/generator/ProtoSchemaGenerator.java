@@ -57,6 +57,11 @@ public class ProtoSchemaGenerator {
         String descriptorBase64 = java.util.Base64.getEncoder().encodeToString(
                 ProtoDescriptorBuilder.build(cacheInfoList, protoPackage, protoFile, mapper).toByteArray());
 
+        // 필드 번호는 선언 순서로 부여된다. 중간에 필드를 끼우면 뒤 번호가 전부 밀려 클라이언트가
+        // 같은 바이트를 다른 필드로 읽는다 — 파싱은 성공하므로 예외가 없다. 커밋된 잠금과 대조한다.
+        Map<String, Integer> numbers = WireNumberLock.currentNumbers(cacheInfoList);
+        WireNumberLock.verify(numbers, env, WireNumberLock.write(numbers, env));
+
         writeProtoResource(env, protoFile, protoText);
         writeSchemaClass(env, protoPackage, protoFile, protoText, schemaHash, descriptorBase64);
 

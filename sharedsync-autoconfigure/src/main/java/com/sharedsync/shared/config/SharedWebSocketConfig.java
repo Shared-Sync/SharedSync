@@ -21,7 +21,13 @@ import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
 import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 
+import com.sharedsync.shared.auth.AuthenticationTokenResolver;
+import com.sharedsync.shared.auth.StompAccessValidator;
 import com.sharedsync.shared.auth.WsAuthChannelInterceptor;
+import com.sharedsync.shared.listener.SharedEventTracker;
+import com.sharedsync.shared.presence.core.PresenceRootResolver;
+import com.sharedsync.shared.properties.SharedSyncAuthProperties;
+import com.sharedsync.shared.properties.SharedSyncPresenceProperties;
 import com.sharedsync.shared.listener.PresenceSessionManager;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.transport.StompSyncTransport;
@@ -81,6 +87,31 @@ public class SharedWebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Bean
     public SyncTransport stompSyncTransport(SimpMessagingTemplate messagingTemplate) {
         return new StompSyncTransport(messagingTemplate);
+    }
+
+    /**
+     * STOMP 프레임 단의 인증·인가. raw WebSocket 에는 CONNECT/SUBSCRIBE/SEND 프레임이 없어
+     * 이 인터셉터가 걸릴 자리도 없다 — 그쪽은 핸드셰이크와 Join 에서 같은 일을 한다.
+     */
+    @Bean
+    public WsAuthChannelInterceptor wsAuthChannelInterceptor(
+            AuthenticationTokenResolver tokenResolver,
+            ObjectProvider<List<StompAccessValidator>> accessValidators,
+            SharedSyncAuthProperties authProperties) {
+        return new WsAuthChannelInterceptor(tokenResolver,
+                accessValidators.getIfAvailable(Collections::emptyList), authProperties);
+    }
+
+    /**
+     * STOMP SUBSCRIBE/DISCONNECT 이벤트를 프레즌스로 옮기는 리스너.
+     * raw WebSocket 모드에서는 이 이벤트 자체가 발생하지 않으므로 등록하지 않는다.
+     */
+    @Bean
+    public SharedEventTracker sharedEventTracker(
+            @Lazy PresenceSessionManager presenceSessionManager,
+            PresenceRootResolver presenceRootResolver,
+            SharedSyncPresenceProperties presenceProperties) {
+        return new SharedEventTracker(presenceSessionManager, presenceRootResolver, presenceProperties);
     }
 
     @Override

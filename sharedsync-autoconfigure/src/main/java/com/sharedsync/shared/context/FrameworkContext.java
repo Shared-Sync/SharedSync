@@ -11,7 +11,6 @@ import org.springframework.stereotype.Component;
  * - Reflection 기반 자동 스캔이 필요한 모든 컴포넌트는 여기서 basePackage를 가져다 사용
  * - 한 번 초기화되면 static 지역에 저장되어 어디서든 접근 가능
  */
-@Component
 public class FrameworkContext implements ApplicationContextAware {
 
     private static String basePackage = "com";   // fallback 기본값

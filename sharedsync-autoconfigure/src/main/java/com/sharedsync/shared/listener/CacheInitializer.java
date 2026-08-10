@@ -15,7 +15,6 @@ import com.sharedsync.shared.storage.PresenceStorage;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 
-@Component
 @RequiredArgsConstructor
 public class CacheInitializer {
 

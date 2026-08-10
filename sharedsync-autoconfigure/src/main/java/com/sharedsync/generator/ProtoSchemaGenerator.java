@@ -46,8 +46,10 @@ public class ProtoSchemaGenerator {
             return;
         }
 
-        String protoPackage = option(env, OPTION_PACKAGE, DEFAULT_PACKAGE);
-        String protoFile = option(env, OPTION_FILE, DEFAULT_FILE);
+        // 앱이 좌표를 지정하지 않으면 엔티티 패키지에서 유도한다. 빌드 스크립트에 두 줄을 적어야
+        // wire 스키마가 나오는 구조라면, 그건 프레임워크가 앱에 숙제를 미룬 것이다.
+        String protoPackage = option(env, OPTION_PACKAGE, derivePackage(cacheInfoList));
+        String protoFile = option(env, OPTION_FILE, protoPackage.replace('.', '/') + "/sync.proto");
 
         ProtoTypeMapper mapper = new ProtoTypeMapper(env);
         String protoText = buildProtoText(cacheInfoList, protoPackage, mapper);
@@ -67,6 +69,47 @@ public class ProtoSchemaGenerator {
 
         env.getMessager().printMessage(Diagnostic.Kind.NOTE,
                 "[SharedSync] wire schema generated: " + protoFile + " (hash=" + schemaHash + ")");
+    }
+
+    /**
+     * 엔티티들의 공통 패키지에서 proto package 를 만든다.
+     * 예: com.planmate.domain.plan.entity.Plan / ...timetable.entity.TimeTable -> planmate.sync.v1
+     *
+     * buf lint STANDARD 는 package 가 버전으로 끝나고 디렉터리 경로가 그와 일치할 것을 요구하므로,
+     * 파일 경로도 이 값에서 함께 만든다.
+     */
+    private static String derivePackage(List<CacheInformation> cacheInfoList) {
+        List<String> segments = null;
+        for (CacheInformation info : cacheInfoList) {
+            String path = info.getEntityPath();
+            if (path == null || path.isBlank()) {
+                continue;
+            }
+            List<String> parts = new ArrayList<>(List.of(path.split("\\.")));
+            parts.remove(parts.size() - 1); // 클래스명 제거
+            if (segments == null) {
+                segments = parts;
+                continue;
+            }
+            int common = 0;
+            while (common < segments.size() && common < parts.size()
+                    && segments.get(common).equals(parts.get(common))) {
+                common++;
+            }
+            segments = new ArrayList<>(segments.subList(0, common));
+        }
+
+        if (segments == null || segments.isEmpty()) {
+            return DEFAULT_PACKAGE;
+        }
+        // com.planmate -> planmate. 앞의 com/org/io 같은 관용 접두사는 스키마 이름에 의미가 없다.
+        String name = segments.get(segments.size() - 1);
+        if (segments.size() > 1 && List.of("com", "org", "io", "net", "kr", "co").contains(segments.get(0))
+                && segments.size() >= 2) {
+            name = segments.get(1);
+        }
+        name = name.toLowerCase().replaceAll("[^a-z0-9]", "");
+        return name.isEmpty() ? DEFAULT_PACKAGE : name + ".sync.v1";
     }
 
     // ==========================================

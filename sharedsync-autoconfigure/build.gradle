@@ -17,6 +17,11 @@ dependencies {
     // SharedSync 는 JitPack 에서 소스 빌드되므로 빌드 중 외부 바이너리 내려받기는 깨지기 쉽다.
     api("com.google.protobuf:protobuf-java:4.31.1")
 
+    // 관측성은 선택 의존이다. MeterRegistry 가 있는 앱에서만 메트릭을 등록하고,
+    // 없는 앱은 SyncMetrics.NOOP 로 동작한다 — 프레임워크가 액추에이터를 강제하지 않는다.
+    compileOnly("io.micrometer:micrometer-core")
+    testImplementation("io.micrometer:micrometer-core")
+
     // 통합 테스트(AutoCacheRepository DB 경로 검증)용 — 실제 Postgres 연결
     testRuntimeOnly("org.postgresql:postgresql")
 

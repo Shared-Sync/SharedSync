@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -23,6 +24,8 @@ import com.sharedsync.shared.codec.ProtoSyncCodec;
 import com.sharedsync.shared.codec.SyncCodec;
 import com.sharedsync.shared.controller.SyncDispatcher;
 import com.sharedsync.shared.listener.PresenceSessionManager;
+import com.sharedsync.shared.metrics.MicrometerSyncMetrics;
+import com.sharedsync.shared.metrics.SyncMetrics;
 import com.sharedsync.shared.presence.core.PresenceRootResolver;
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
@@ -121,10 +124,12 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
             PresenceRootResolver presenceRootResolver,
             SharedSyncAuthProperties authProperties,
             ObjectProvider<SyncAccessValidator> accessValidator,
-            SyncFrameExecutor frameExecutor
+            SyncFrameExecutor frameExecutor,
+            ObjectProvider<SyncMetrics> metrics
     ) {
         return new SyncWebSocketHandler(registry, decoder, requireProtoCodec(codec), dispatcher,
-                presenceSessionManager, presenceRootResolver, authProperties, frameExecutor, accessValidator);
+                presenceSessionManager, presenceRootResolver, authProperties, frameExecutor,
+                metrics.getIfAvailable(() -> SyncMetrics.NOOP), accessValidator);
     }
 
     /**
@@ -137,6 +142,20 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
                                                            SharedSyncAuthProperties authProperties) {
         return new StompAccessValidatorAdapter(validators.getIfAvailable(Collections::emptyList),
                 authProperties.isDenyUnmatched());
+    }
+
+    /**
+     * MeterRegistry 가 있는 앱에서만 등록한다. 없으면 핸들러가 SyncMetrics.NOOP 를 쓴다 —
+     * 관측성 때문에 액추에이터를 강제하지는 않는다.
+     */
+    @Bean
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
+    @ConditionalOnMissingBean(SyncMetrics.class)
+    public SyncMetrics syncMetrics(ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meterRegistry,
+                                   WebSocketSessionRegistry sessions,
+                                   SyncFrameExecutor executor) {
+        io.micrometer.core.instrument.MeterRegistry registry = meterRegistry.getIfAvailable();
+        return registry == null ? SyncMetrics.NOOP : new MicrometerSyncMetrics(registry, sessions, executor);
     }
 
     @Bean

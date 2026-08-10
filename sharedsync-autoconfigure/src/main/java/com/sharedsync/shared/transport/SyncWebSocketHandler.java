@@ -15,6 +15,7 @@ import com.sharedsync.shared.codec.ProtoFrameDecoder;
 import com.sharedsync.shared.codec.ProtoSyncCodec;
 import com.sharedsync.shared.controller.SyncDispatcher;
 import com.sharedsync.shared.listener.PresenceSessionManager;
+import com.sharedsync.shared.metrics.SyncMetrics;
 import com.sharedsync.shared.presence.core.PresenceRootResolver;
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 
@@ -49,6 +50,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
     private final PresenceRootResolver presenceRootResolver;
     private final SharedSyncAuthProperties authProperties;
     private final SyncFrameExecutor frameExecutor;
+    private final SyncMetrics metrics;
     /** 앱이 제공하지 않으면 인가 없이 통과한다 (auth.enabled=false 데모 모드와 같은 취급). */
     private final ObjectProvider<SyncAccessValidator> accessValidator;
 
@@ -69,13 +71,15 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             // 스키마 스큐거나 프레임이 깨진 것이다. 연결을 끊지는 않는다 — 클라이언트가
             // 재전송하거나 Join 부터 다시 할 수 있다.
             log.warn("[SharedSync] ClientFrame 파싱 실패 sessionId={}: {}", sessionId, e.getMessage());
-            send(sessionId, codec.encodeError("MALFORMED_FRAME", "ClientFrame 파싱 실패"));
+            metrics.frame("malformed");
+            sendError(sessionId, "MALFORMED_FRAME", "ClientFrame 파싱 실패");
             return;
         }
 
         // ping 은 상태를 건드리지 않으니 읽기 스레드에서 바로 답한다. 오히려 이게 하트비트의 목적에 맞다 —
         // 편집 큐가 밀려 있어도 생존 확인은 즉시 돌아가야 한다.
         if (frame instanceof ClientFrame.Ping) {
+            metrics.frame("ping");
             presenceSessionManager.handleHeartbeat(sessionId);
             send(sessionId, codec.encodePong());
             return;
@@ -85,7 +89,8 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
         boolean accepted = frameExecutor.submit(sessionId, () -> process(session, frame));
         if (!accepted) {
             // 큐 한도 초과. 조용히 버리면 클라이언트는 편집이 반영된 줄 안다.
-            send(sessionId, codec.encodeError("BACKPRESSURE", "처리 대기열이 가득 찼다. 잠시 후 재시도할 것"));
+            metrics.rejected();
+            sendError(sessionId, "BACKPRESSURE", "처리 대기열이 가득 찼다. 잠시 후 재시도할 것");
         }
     }
 
@@ -96,16 +101,19 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             presenceSessionManager.handleHeartbeat(sessionId);
 
             if (frame instanceof ClientFrame.Join join) {
+                metrics.frame("join");
                 handleJoin(session, join);
             } else if (frame instanceof ClientFrame.Edit edit) {
+                metrics.frame("edit");
                 handleEdit(session, edit);
             } else if (frame instanceof ClientFrame.Unknown unknown) {
+                metrics.frame("unknown");
                 log.debug("[SharedSync] 처리할 수 없는 프레임 sessionId={}: {}", sessionId, unknown.detail());
-                send(sessionId, codec.encodeError("UNKNOWN_FRAME", unknown.detail()));
+                sendError(sessionId, "UNKNOWN_FRAME", unknown.detail());
             }
         } catch (Exception e) {
             log.error("[SharedSync] 프레임 처리 실패 sessionId={}: {}", sessionId, e.getMessage(), e);
-            send(sessionId, codec.encodeError("INTERNAL_ERROR", e.getMessage()));
+            sendError(sessionId, "INTERNAL_ERROR", e.getMessage());
         }
     }
 
@@ -114,7 +122,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
         String roomId = join.roomId();
 
         if (roomId == null || roomId.isBlank()) {
-            send(sessionId, codec.encodeError("INVALID_JOIN", "room_id 가 비어 있다"));
+            sendError(sessionId, "INVALID_JOIN", "room_id 가 비어 있다");
             return;
         }
 
@@ -123,15 +131,14 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
         if (!serverHash.equals(join.schemaHash())) {
             log.warn("[SharedSync] 스키마 해시 불일치 sessionId={} client={} server={}",
                     sessionId, join.schemaHash(), serverHash);
-            send(sessionId, codec.encodeError("SCHEMA_MISMATCH",
-                    "클라이언트 스키마가 서버와 다르다. server=" + serverHash));
+            sendError(sessionId, "SCHEMA_MISMATCH", "클라이언트 스키마가 서버와 다르다. server=" + serverHash);
             closeQuietly(session, CloseStatus.POLICY_VIOLATION);
             return;
         }
 
         String userId = userIdOf(session);
         if (authProperties.isEnabled() && userId == null) {
-            send(sessionId, codec.encodeError("UNAUTHENTICATED", "핸드셰이크에서 사용자를 확인하지 못했다"));
+            sendError(sessionId, "UNAUTHENTICATED", "핸드셰이크에서 사용자를 확인하지 못했다");
             closeQuietly(session, CloseStatus.POLICY_VIOLATION);
             return;
         }
@@ -142,7 +149,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
                 validator.validate(userId, roomId, presenceRootResolver.getChannel());
             } catch (Exception e) {
                 log.info("[SharedSync] 룸 접근 거부 userId={} roomId={}: {}", userId, roomId, e.getMessage());
-                send(sessionId, codec.encodeError("ACCESS_DENIED", "룸에 접근할 수 없다"));
+                sendError(sessionId, "ACCESS_DENIED", "룸에 접근할 수 없다");
                 closeQuietly(session, CloseStatus.POLICY_VIOLATION);
                 return;
             }
@@ -157,7 +164,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
         String sessionId = session.getId();
         String roomId = registry.roomOf(sessionId);
         if (roomId == null) {
-            send(sessionId, codec.encodeError("NOT_JOINED", "Join 이 먼저 필요하다"));
+            sendError(sessionId, "NOT_JOINED", "Join 이 먼저 필요하다");
             return;
         }
 
@@ -168,7 +175,7 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
             dispatcher.dispatch(roomId, edit);
         } catch (Exception e) {
             log.error("[SharedSync] 편집 처리 실패 sessionId={} roomId={}: {}", sessionId, roomId, e.getMessage(), e);
-            send(sessionId, codec.encodeError("EDIT_FAILED", e.getMessage()));
+            sendError(sessionId, "EDIT_FAILED", e.getMessage());
         } finally {
             WebSocketSyncSessionContext.clear();
         }
@@ -209,6 +216,12 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler {
     private String userIdOf(WebSocketSession session) {
         Object value = session.getAttributes().get(USER_ID);
         return value == null ? null : String.valueOf(value);
+    }
+
+    /** 에러 프레임은 한 곳으로 모은다 — 코드별 카운터를 빠뜨리지 않기 위해서다. */
+    private void sendError(String sessionId, String code, String message) {
+        metrics.error(code);
+        send(sessionId, codec.encodeError(code, message));
     }
 
     /** 등록된 세션(동시 전송 보호 래퍼)을 거쳐 보낸다. 원본 세션에 직접 쓰면 직렬화가 깨진다. */

@@ -16,8 +16,6 @@ import org.springframework.beans.factory.support.GenericBeanDefinition;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.cache.annotation.EnableCaching;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -51,25 +49,7 @@ import io.lettuce.core.ReadFrom;
 @EnableCaching
 @Configuration
 @ConditionalOnProperty(name = "sharedsync.cache.type", havingValue = "redis")
-public class RedisConfig implements ApplicationContextAware {
-
-    private String basePackage = "com"; // fallback 기본값
-
-    @Override
-    public void setApplicationContext(ApplicationContext applicationContext) {
-        String mainClassName = applicationContext.getEnvironment().getProperty("sun.java.command");
-        if (mainClassName != null) {
-            try {
-                Class<?> mainClass = Class.forName(mainClassName.split(" ")[0]);
-                Package mainPackage = mainClass.getPackage();
-                if (mainPackage != null) {
-                    basePackage = mainPackage.getName();
-                }
-            } catch (Exception e) {
-                basePackage = "com";
-            }
-        }
-    }
+public class RedisConfig {
 
     @Bean
     public RedisTemplate<String, Integer> refreshRedisTemplate(

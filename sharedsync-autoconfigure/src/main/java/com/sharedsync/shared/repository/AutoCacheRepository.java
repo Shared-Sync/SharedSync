@@ -66,6 +66,13 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     /** 한 번 해석한 PresenceStorage. 예전에는 findById 마다 타입으로 빈을 찾았다. */
     private volatile PresenceStorage presenceStorage;
 
+    /**
+     * ID Pool 을 쓰지 않는 앱(과 이 저장소만 띄우는 테스트 컨텍스트)에는 없을 수 있다.
+     * 필수로 걸면 @CacheEntity(useIdPool=false) 만 쓰는 구성에서 기동이 깨진다.
+     */
+    @Autowired(required = false)
+    private IdPoolService idPoolService;
+
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -141,8 +148,10 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
         this.parentIndex = new ParentIndex<>(this::getCacheStore);
         // EntityManager 는 필드주입 이후 평가되도록 Supplier 로 전달.
         this.converter = new EntityDtoConverter<>(metadata, idType, () -> entityManager);
+        // IdPoolService 는 주입 필드를 지연 평가한다. 생성자 시점에는 아직 주입 전이지만
+        // 실제 호출은 그 뒤라 안전하다. 예전에는 호출마다 컨텍스트에서 타입으로 찾았다.
         this.idGenerator = new IdGenerator<>(metadata, this::getCacheStore,
-                () -> applicationContext.getBean(IdPoolService.class), () -> entityManager);
+                () -> idPoolService, () -> entityManager);
         this.dbReader = new DatabaseReader<>(metadata, idType, () -> entityManager);
         this.dbWriter = new DatabaseWriter<>(metadata, idType, () -> entityManager);
     }

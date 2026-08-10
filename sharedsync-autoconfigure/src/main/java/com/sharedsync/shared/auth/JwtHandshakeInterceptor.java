@@ -29,7 +29,16 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
 
         // 🚀 데모 모드: 인증 완전 비활성화
         if (!authProperties.isEnabled()) {
-            attributes.put("userId", tokenResolver.extractPrincipalId("token"));
+            // 앱이 자체 resolver 를 등록해 두었다면 그쪽은 더미 토큰을 해석하지 못한다.
+            // 데모 모드에서 실패시킬 이유가 없으므로 합성 ID 로 넘어간다
+            // (프레즌스는 어차피 auth 가 꺼져 있으면 "ws-{sessionId}" 를 쓴다).
+            String demoUserId;
+            try {
+                demoUserId = tokenResolver.extractPrincipalId("token");
+            } catch (Exception e) {
+                demoUserId = "demo-" + java.util.UUID.randomUUID();
+            }
+            attributes.put("userId", demoUserId);
             return true;
         }
 

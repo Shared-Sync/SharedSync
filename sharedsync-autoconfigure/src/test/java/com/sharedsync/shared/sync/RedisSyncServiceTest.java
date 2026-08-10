@@ -60,6 +60,54 @@ class RedisSyncServiceTest {
     }
 
     @Test
+    @DisplayName("채널이 하나면 channel 태그를 싣지 않는다 (구버전 인스턴스가 읽을 수 있어야 한다)")
+    void singleChannelPublishesWithoutChannelTag() {
+        redisSync(true);
+
+        redisSyncService.publish("/topic/room-1", "payload");
+
+        ArgumentCaptor<RedisSyncMessage> captor = ArgumentCaptor.forClass(RedisSyncMessage.class);
+        verify(redisSyncTemplate).convertAndSend(eq("sync-channel"), captor.capture());
+        assertThat(captor.getValue().getChannel())
+                .as("롤링 배포 중 구버전 인스턴스의 ObjectMapper 는 모르는 필드에서 예외를 던진다 — "
+                        + "그러면 그 인스턴스에 붙은 세션들이 팬아웃을 통째로 못 받는다")
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("채널이 둘이면 각자 태그를 달아 발행한다 (수신측이 자기 채널만 골라야 한다)")
+    void multipleChannelsTagEachMessage() {
+        redisSync(true);
+        SyncTransport wsTransport = mock(SyncTransport.class);
+        SyncCodec wsCodec = mock(SyncCodec.class);
+        lenient().when(wsCodec.encode(any())).thenReturn(ENCODED);
+        lenient().when(wsCodec.contentType()).thenReturn(MimeTypeUtils.APPLICATION_OCTET_STREAM);
+
+        RedisSyncService dual = new RedisSyncService(redisSyncTemplate, java.util.List.of(
+                new SyncChannel(SyncChannel.STOMP, transport, codec),
+                new SyncChannel(SyncChannel.WEBSOCKET, wsTransport, wsCodec)), props);
+
+        dual.publish("/topic/room-1", "payload");
+
+        ArgumentCaptor<RedisSyncMessage> captor = ArgumentCaptor.forClass(RedisSyncMessage.class);
+        verify(redisSyncTemplate, times(2)).convertAndSend(eq("sync-channel"), captor.capture());
+        assertThat(captor.getAllValues()).extracting(RedisSyncMessage::getChannel)
+                .containsExactly(SyncChannel.STOMP, SyncChannel.WEBSOCKET);
+    }
+
+    @Test
+    @DisplayName("태그 없는 메시지는 모든 채널로 전달한다 (구버전 인스턴스가 발행한 것)")
+    void untaggedMessageGoesToEveryChannel() {
+        redisSyncService.handleMessage(RedisSyncMessage.builder()
+                .destination("/topic/room-1")
+                .payload(ENCODED)
+                .contentType("application/json")
+                .build());
+
+        verify(transport).send(eq("/topic/room-1"), eq(ENCODED), any());
+    }
+
+    @Test
     @DisplayName("publish: Redis 동기화가 비활성화 되어있으면 인코딩된 바이트를 로컬 transport 로만 보낸다")
     void publish_local() {
         redisSync(false);

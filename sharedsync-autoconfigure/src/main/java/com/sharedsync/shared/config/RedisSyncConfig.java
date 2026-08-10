@@ -62,6 +62,10 @@ public class RedisSyncConfig {
         ObjectMapper cleanMapper = new ObjectMapper();
         cleanMapper.registerModule(new JavaTimeModule());
         cleanMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        // 롤링 배포 중에는 신·구 인스턴스가 같은 Redis 채널을 공유한다. 새 버전이 필드를 추가하면
+        // 구버전은 기본 설정(FAIL_ON_UNKNOWN_PROPERTIES=true)에서 예외를 던지고 팬아웃이 끊긴다.
+        // 이 설정만으로 과거 버전을 구할 수는 없지만, 앞으로의 필드 추가는 안전해진다.
+        cleanMapper.disable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
         MessageListenerAdapter adapter = new MessageListenerAdapter(new Object() {
             @SuppressWarnings("unused")

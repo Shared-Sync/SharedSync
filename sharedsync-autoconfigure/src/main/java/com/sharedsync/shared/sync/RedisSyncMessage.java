@@ -13,6 +13,9 @@ import lombok.Setter;
  * 왕복하며 LinkedHashMap 으로 퇴화해 수신 인스턴스에서는 원래 타입을 잃는다.
  * byte[] 는 Jackson 이 base64 로 왕복시키므로 바이트가 그대로 복원된다.
  */
+// null 필드를 내보내지 않는다. 구버전 인스턴스가 이 메시지를 읽을 수도 있고,
+// 모르는 필드는 그쪽 ObjectMapper 에서 예외가 된다.
+@com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
 @Getter
 @Setter
 @Builder

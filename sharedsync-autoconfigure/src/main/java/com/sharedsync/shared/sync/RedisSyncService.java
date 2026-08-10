@@ -42,7 +42,7 @@ public class RedisSyncService {
                     .destination(destination)
                     .payload(encoded)
                     .contentType(channel.codec().contentType().toString())
-                    .channel(channel.name())
+                    .channel(channelTag(channel))
                     .build());
         }
     }
@@ -67,7 +67,7 @@ public class RedisSyncService {
                     .destination(destination)
                     .payload(encoded)
                     .contentType(channel.codec().contentType().toString())
-                    .channel(channel.name())
+                    .channel(channelTag(channel))
                     .targetSessionId(sessionId)
                     .targetUserId(user)
                     .build());
@@ -106,6 +106,18 @@ public class RedisSyncService {
         } catch (Exception e) {
             log.error("웹소켓 메시지 전달 중 오류 발생: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * 채널이 하나뿐이면 태그를 붙이지 않는다.
+     *
+     * 롤링 배포 중에는 구버전 인스턴스가 같은 Redis 채널을 구독하고 있는데, 그쪽 ObjectMapper 는
+     * 모르는 필드를 만나면 예외를 던진다(Jackson 기본값). 태그를 실으면 구버전 인스턴스에 붙어 있는
+     * 세션들이 팬아웃을 통째로 못 받고, 그 인스턴스의 로그에는 아무것도 남지 않는다.
+     * 채널이 하나인 배포(=지금까지의 모든 배포)에서는 예전과 바이트가 같다.
+     */
+    private String channelTag(SyncChannel channel) {
+        return channels.size() > 1 ? channel.name() : null;
     }
 
     /**

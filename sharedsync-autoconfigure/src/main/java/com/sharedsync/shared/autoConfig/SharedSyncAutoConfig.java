@@ -26,6 +26,10 @@ import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.transport.StompSyncSessionContext;
 import com.sharedsync.shared.transport.SyncSessionContext;
 
+// ServletWebServerFactory 존재 여부로 조건을 거는 빈이 있어(프레임 버퍼) 웹 서버 자동설정보다
+// 뒤에 평가되어야 한다.
+@org.springframework.boot.autoconfigure.AutoConfigureAfter(
+        org.springframework.boot.autoconfigure.web.servlet.ServletWebServerFactoryAutoConfiguration.class)
 @Configuration
 @EnableConfigurationProperties(SharedSyncWebSocketProperties.class)
 @EnableScheduling

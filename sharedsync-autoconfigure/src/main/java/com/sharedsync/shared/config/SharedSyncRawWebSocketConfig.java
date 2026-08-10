@@ -90,9 +90,15 @@ public class SharedSyncRawWebSocketConfig implements WebSocketConfigurer {
     /**
      * 인바운드 프레임 버퍼. 컨테이너 기본값(8KB)을 넘는 편집이 오면 프레임이 쪼개지는데 핸들러는
      * 부분 메시지를 조립하지 않는다 — STOMP 에서는 브로커가 해주던 일이라 앱이 알 필요가 없었다.
+     *
+     * 임베디드 컨테이너가 실제로 뜰 때만 등록한다. MockMvc 컨텍스트(@SpringBootTest 기본값,
+     * @WebMvcTest)에는 ServerContainer 가 없어서 이 빈이 기동을 통째로 깨뜨린다 —
+     * "Attribute 'jakarta.websocket.server.ServerContainer' not found in ServletContext".
+     * WebSocket 과 무관한 컨트롤러 테스트까지 전부 죽는다.
      */
     @Bean
     @ConditionalOnMissingBean(ServletServerContainerFactoryBean.class)
+    @Conditional(EmbeddedServletContainerCondition.class)
     public ServletServerContainerFactoryBean sharedSyncServletContainer() {
         ServletServerContainerFactoryBean container = new ServletServerContainerFactoryBean();
         container.setMaxBinaryMessageBufferSize(props.getMaxFrameSize());

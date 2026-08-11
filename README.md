@@ -30,17 +30,43 @@ SharedSync는 **Spring Boot** 환경에서 실시간 협업 편집 기능을 손
 
 ## 설치 방법 (Installation)
 
-`sharedsync`는 Gradle 멀티 모듈 프로젝트로 구성되어 있습니다. 사용하려는 프로젝트의 `build.gradle`에 다음과 같이 의존성을 추가합니다.
+JitPack 으로 배포됩니다. 버전은 커밋 해시(10자) 또는 태그입니다.
 
 ```gradle
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
 dependencies {
-    // SharedSync 스타터 추가
-    implementation project(':sharedsync-starter')
-    
-    // Annotation Processor 추가 (코드 생성 기능을 위해 필요)
-    annotationProcessor project(':sharedsync-autoconfigure')
+    implementation "com.github.Shared-Sync.SharedSync:sharedsync-starter:$sharedSyncVersion"
+    // 코드 생성(DTO/서비스/컨트롤러/wire 스키마)에 반드시 필요하다
+    annotationProcessor "com.github.Shared-Sync.SharedSync:sharedsync-autoconfigure:$sharedSyncVersion"
 }
 ```
+
+멀티 모듈로 함께 빌드한다면 `project(':sharedsync-starter')` / `project(':sharedsync-autoconfigure')`
+를 쓴다.
+
+---
+
+## 빠른 시작 (Quick Start)
+
+1. 협업 대상 엔티티에 `@CacheEntity` + `@CacheId`, 방의 루트에 `@PresenceRoot`, 접속자 엔티티에
+   `@PresenceUser` 를 붙인다 ([§사용 방법](#사용-방법-how-to-use))
+2. `AuthenticationTokenResolver` 빈을 등록한다
+3. `application.yml` 에 endpoint 를 지정한다
+
+```yaml
+sharedsync:
+  websocket:
+    endpoint: /ws
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+  cache:
+    type: redis
+```
+
+이걸로 STOMP + JSON 전송이 동작한다. 컨트롤러·DTO·서비스·저장소는 애노테이션 프로세서가 만든다.
+protobuf 전송으로 넘어가려면 [§전송 계층 전환](#전송-계층-전환)을 본다.
 
 ---
 
@@ -149,9 +175,6 @@ public class RoomAccessValidator implements SyncAccessValidator {
 2. `Sec-WebSocket-Protocol: sharedsync.v1, bearer.<token>` — 브라우저
 3. `?token=<token>` — 하위 호환. **URL 은 액세스 로그에 남으므로 권장하지 않는다**
 
-> raw WebSocket + protobuf 전송의 클라이언트 계약(프레임 순서, 에러 코드, 백프레셔, 스키마 협상)은
-> [docs/wire-protocol.md](docs/wire-protocol.md) 에 있다.
-
 ### 3. 프레임워크가 제공하는 것
 
 - `SharedSyncController` — 편집 메시지 디스패치(STOMP `@MessageMapping` + raw WS 양쪽)
@@ -159,6 +182,56 @@ public class RoomAccessValidator implements SyncAccessValidator {
 - 프레즌스 등록·브로드캐스트, undo/redo 히스토리, Redis 팬아웃, ID Pool
 - MeterRegistry 가 있으면 `sharedsync.frames`, `sharedsync.ws.sessions`,
   `sharedsync.errors{code}` 등 메트릭 (없으면 no-op)
+
+---
+
+## 클라이언트 붙이기
+
+프론트엔드/앱에서 연결하는 방법은 **[docs/client-guide.md](docs/client-guide.md)** 에 있다.
+어댑터로 감싸 기존 호출부를 그대로 두는 최소 변경 경로, 스키마 받기, 타입 왕복에서 반드시
+다뤄야 하는 네 가지(미설정 필드 보존 / int64 / BigDecimal / enum 접두사), 에러 코드 대응을 다룬다.
+
+프레임 단위 계약(순서, oneof 구성, 백프레셔, 크기 제한)은
+**[docs/wire-protocol.md](docs/wire-protocol.md)** 를 본다.
+
+STOMP + JSON 을 쓰는 동안에는 클라이언트에 특별한 계약이 없다. 목적지는 편집이
+`/topic/{roomId}`, 프레즌스가 `/topic/{presenceChannel}/{roomId}`, 발행은 `/app/{roomId}` 다.
+
+---
+
+## 전송 계층 전환
+
+`transport` 하나로 정한다. codec 과 SockJS 는 프레임워크가 맞춘다.
+
+```
+stomp        기본. STOMP + JSON. 지금까지의 동작.
+  ↓
+both         둘을 동시에 서비스한다. raw WS 는 <endpoint>/v2 로 뜬다.
+  ↓          같은 룸을 공유하므로 구·신 클라이언트가 서로의 편집을 본다.
+websocket    raw WebSocket + protobuf 만. 경로는 <endpoint> 로 돌아온다.
+```
+
+`both` 가 필요한 이유는 웹과 앱의 배포 시점이 다르기 때문이다. 앱은 사용자가 업데이트해야 하므로
+"모든 클라이언트를 같은 순간에 바꾸기"는 실제로는 성립하지 않는다.
+
+전환 전 확인할 것:
+
+- **프록시가 WebSocket upgrade 를 통과시키는지.** SockJS 는 실패해도 폴백으로 조용히 동작하므로,
+  "지금 잘 된다"가 upgrade 가 된다는 뜻이 아니다. 브라우저 DevTools 에서 `101 Switching Protocols`
+  를 확인한다. `proxy_read_timeout` 은 ping 주기(기본 25초)보다 커야 한다.
+- **allowed-origins 에 실제 프론트 도메인이 있는지.** raw WS 는 브라우저가 Origin 을 반드시
+  보내므로, 목록이 어긋나면 핸드셰이크가 403 으로 막힌다.
+- **필드 순서.** proto 필드 번호는 엔티티 선언 순서로 부여된다. 새 필드는 항상 맨 뒤에 선언하고,
+  `sharedsync-wire.lock` 을 `src/main/resources/` 에 커밋해두면 어긋나는 변경을 컴파일 시점에 잡는다.
+
+---
+
+## 문서
+
+| | |
+| :--- | :--- |
+| [docs/client-guide.md](docs/client-guide.md) | 프론트엔드/앱 연결 가이드 |
+| [docs/wire-protocol.md](docs/wire-protocol.md) | raw WebSocket + protobuf 프레임 계약 |
 
 ---
 

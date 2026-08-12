@@ -55,6 +55,10 @@ public class SyncSchemaController {
                     return ServerResponse.ok()
                             .contentType(new MediaType(MediaType.TEXT_PLAIN, StandardCharsets.UTF_8))
                             .header(HASH_HEADER, hash)
+                            // 교차 출처에서는 이 선언이 없으면 브라우저가 커스텀 헤더를 감춘다.
+                            // 클라이언트는 해시를 직접 계산하는 편이 맞지만, 헤더를 읽으려다
+                            // null 을 받아 빈 해시로 Join 하는 실수를 막아준다.
+                            .header("Access-Control-Expose-Headers", HASH_HEADER + ", ETag")
                             .eTag(hash)
                             .body(resolved.getProtoText());
                 })

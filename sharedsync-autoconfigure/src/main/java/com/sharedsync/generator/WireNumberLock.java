@@ -50,6 +50,17 @@ final class WireNumberLock {
 
     static final String LOCK_FILE = "sharedsync-wire.lock";
 
+    /**
+     * 생성물을 담을 하위 디렉터리.
+     *
+     * CLASS_OUTPUT 바로 아래에 쓰면 앱이 커밋해둔 {@code src/main/resources/sharedsync-wire.lock} 와
+     * <b>같은 자리로 합쳐진다</b>. Gradle 은 두 파일을 하나의 출력에 넣으려다 bootJar 에서
+     * "duplicate ... no duplicate handling strategy" 로 빌드를 깬다 — README 대로 잠금을 커밋한
+     * 앱은 전부 여기에 걸린다. 이 파일은 런타임에 읽히지 않으므로(컴파일 시점에 파일 경로로만 읽는다)
+     * 자리만 비켜주면 된다.
+     */
+    private static final String OUTPUT_DIR = "sharedsync";
+
     private WireNumberLock() {
     }
 
@@ -64,7 +75,7 @@ final class WireNumberLock {
      */
     static FileObject open(ProcessingEnvironment env) {
         try {
-            return env.getFiler().createResource(StandardLocation.CLASS_OUTPUT, "", LOCK_FILE);
+            return env.getFiler().createResource(StandardLocation.CLASS_OUTPUT, OUTPUT_DIR, LOCK_FILE);
         } catch (IOException e) {
             env.getMessager().printMessage(Diagnostic.Kind.WARNING,
                     "[SharedSync] " + LOCK_FILE + " 생성 실패: " + e.getMessage());
@@ -81,8 +92,8 @@ final class WireNumberLock {
         if (locked == null) {
             env.getMessager().printMessage(Diagnostic.Kind.NOTE,
                     "[SharedSync] " + LOCK_FILE + " 이 없어 필드 번호를 선언 순서로 매긴다. "
-                            + "생성된 파일을 src/main/resources/ 에 복사해 커밋하면 이후로는 그 번호가 "
-                            + "고정되고, 필드를 지워도 번호가 밀리지 않는다.");
+                            + "생성된 파일(" + lockFile.toUri() + ")을 src/main/resources/ 에 복사해 "
+                            + "커밋하면 이후로는 그 번호가 고정되고, 필드를 지워도 번호가 밀리지 않는다.");
         }
         return locked;
     }

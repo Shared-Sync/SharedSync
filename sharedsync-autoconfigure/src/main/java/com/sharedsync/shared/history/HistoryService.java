@@ -6,31 +6,42 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.messaging.simp.SimpAttributesContextHolder;
 import org.springframework.stereotype.Service;
 
+import com.sharedsync.shared.codec.SyncOutbound;
 import com.sharedsync.shared.dto.CacheDto;
 import com.sharedsync.shared.repository.AutoCacheRepository;
 import com.sharedsync.shared.sync.RedisSyncService;
+import com.sharedsync.shared.transport.SyncSessionContext;
 
-@Service
 public class HistoryService {
 
-    @Autowired(required = false)
-    @Qualifier("presenceRedis")
-    private RedisTemplate<String, Object> redisTemplate;
+    // 생성자 주입. 필드 주입이면 이 클래스를 테스트에서 그냥 new 할 수 없고, 어떤 의존이
+    // 선택적인지(redisTemplate) 시그니처에 드러나지도 않는다.
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final List<AutoCacheRepository<?, ?, ?>> repositories;
+    private final RedisSyncService redisSyncService;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    private final SyncSessionContext sessionContext;
 
-    @Autowired
-    private List<AutoCacheRepository<?, ?, ?>> repositories;
-
-    @Autowired
-    private RedisSyncService redisSyncService;
-
-    @Autowired
-    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    /**
+     * @param redisTemplate presenceRedis. 없으면 히스토리만 비활성화되고 편집은 그대로 동작한다.
+     */
+    public HistoryService(RedisTemplate<String, Object> redisTemplate,
+                          List<AutoCacheRepository<?, ?, ?>> repositories,
+                          RedisSyncService redisSyncService,
+                          com.fasterxml.jackson.databind.ObjectMapper objectMapper,
+                          SyncSessionContext sessionContext) {
+        this.redisTemplate = redisTemplate;
+        this.repositories = repositories;
+        this.redisSyncService = redisSyncService;
+        this.objectMapper = objectMapper;
+        this.sessionContext = sessionContext;
+    }
 
     private static final ThreadLocal<Boolean> SKIP_HISTORY = ThreadLocal.withInitial(() -> false);
 
@@ -43,11 +54,10 @@ public class HistoryService {
     }
 
     private String getCurrentSessionId() {
-        try {
-            return SimpAttributesContextHolder.currentAttributes().getSessionId();
-        } catch (Exception e) {
-            return null;
-        }
+        // transport 중립. STOMP 이면 SimpAttributes, raw WS 면 핸들러가 채운 ThreadLocal 에서 나온다.
+        // 여기서 null 이 나오면 undo 히스토리가 조용히 기록되지 않으므로 transport 구현이
+        // 반드시 세션을 채워야 한다.
+        return sessionContext.currentSessionId();
     }
 
     private static final String UNDO_PREFIX = "history:undo:";
@@ -56,6 +66,19 @@ public class HistoryService {
 
     public boolean isSupported() {
         return redisTemplate != null;
+    }
+
+    /**
+     * undo/redo 는 Redis 가 있어야 동작한다. 없으면 record/undo/redo 가 전부 조용히 no-op 이 되어
+     * "undo 눌러도 아무 일도 안 일어난다"로만 드러난다. 기동 시 한 번 알린다.
+     */
+    @jakarta.annotation.PostConstruct
+    void warnIfDisabled() {
+        if (!isSupported()) {
+            LoggerFactory.getLogger(HistoryService.class).warn(
+                    "[SharedSync] presenceRedis RedisTemplate 이 없어 undo/redo 히스토리가 비활성화된다. "
+                            + "편집은 정상 동작하지만 undo 요청은 아무 것도 하지 않는다.");
+        }
     }
 
     public void record(String rootId, HistoryAction action) {
@@ -115,11 +138,6 @@ public class HistoryService {
         if (redisSyncService == null || action.getEntityName() == null)
             return;
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("entity", action.getEntityName());
-        response.put("eventId", action.getEventId() == null ? "" : action.getEventId());
-        response.put("isUndoRedo", true);
-
         HistoryAction.Type type = action.getType();
         String broadcastAction;
         Object data;
@@ -144,11 +162,19 @@ public class HistoryService {
             };
         }
 
-        response.put("action", broadcastAction.toLowerCase());
-        String payloadKey = action.getEntityName().toLowerCase() + "s";
-        response.put(payloadKey, data);
+        // 예전에는 페이로드 키를 entityName.toLowerCase()+"s" 로 런타임에 만들어서 일반 편집
+        // 응답("timeTablePlaceBlockDtos")과 모양이 달랐다. 이제 SyncOutbound 로 통일한다 —
+        // 두 클라이언트 모두 두 키를 모두 받아들이는 폴백이 있어 기존 배포본과도 호환된다.
+        @SuppressWarnings("unchecked")
+        List<? extends CacheDto<?>> dtos = (List<? extends CacheDto<?>>) data;
 
-        redisSyncService.publish("/topic/" + rootId, response);
+        redisSyncService.publish("/topic/" + rootId, new SyncOutbound.Entities(
+                action.getEventId() == null ? "" : action.getEventId(),
+                broadcastAction.toLowerCase(),
+                action.getEntityName(),
+                true,
+                SyncOutbound.dtoFieldNameOf(action.getDtoClassName()),
+                dtos == null ? List.of() : dtos));
 
         if (action.getSubActions() != null) {
             for (HistoryAction subAction : action.getSubActions()) {

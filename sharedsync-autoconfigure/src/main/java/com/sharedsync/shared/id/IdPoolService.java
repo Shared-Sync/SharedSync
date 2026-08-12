@@ -25,7 +25,6 @@ import lombok.extern.slf4j.Slf4j;
  * <p>
  * Redis가 비어있거나 사용할 수 없는 경우 DB 시퀀스에서 새로 할당합니다.
  */
-@Service
 @Slf4j
 public class IdPoolService {
 

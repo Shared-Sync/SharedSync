@@ -13,7 +13,6 @@ import com.sharedsync.shared.storage.PresenceStorage;
 
 import lombok.RequiredArgsConstructor;
 
-@Component
 @RequiredArgsConstructor
 public class SharedPresenceFacade {
 

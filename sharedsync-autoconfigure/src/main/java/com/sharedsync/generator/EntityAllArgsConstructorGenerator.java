@@ -134,7 +134,8 @@ public class EntityAllArgsConstructorGenerator {
                 w.write("}\n");
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            processingEnv.getMessager().printMessage(javax.tools.Diagnostic.Kind.ERROR,
+                    "[SharedSync] 전체 인자 생성자 생성 실패: " + e.getMessage());
             return false;
         }
 

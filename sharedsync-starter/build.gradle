@@ -18,4 +18,7 @@ dependencies {
 
     // ★ Redis 필수
     api 'org.springframework.boot:spring-boot-starter-data-redis'
+
+    // ★ protobuf wire 코덱 런타임 (소비자에게 전이)
+    api 'com.google.protobuf:protobuf-java:4.31.1'
 }

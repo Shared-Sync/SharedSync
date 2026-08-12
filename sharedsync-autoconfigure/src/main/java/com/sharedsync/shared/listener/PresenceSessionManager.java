@@ -17,14 +17,15 @@ import com.sharedsync.shared.presence.core.PresenceRootResolver;
 import com.sharedsync.shared.presence.core.UserProvider;
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncPresenceProperties;
+import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.storage.PresenceStorage;
+import com.sharedsync.shared.transport.WebSocketSessionRegistry;
 import com.sharedsync.shared.sync.CacheSyncService;
 
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
-@Service
 @RequiredArgsConstructor
 @Slf4j
 public class PresenceSessionManager {
@@ -42,6 +43,9 @@ public class PresenceSessionManager {
     private final PresenceRootResolver presenceRootResolver;
     private final SharedSyncAuthProperties authProperties;
     private final SharedSyncPresenceProperties presenceProperties;
+    private final SharedSyncWebSocketProperties webSocketProperties;
+    /** raw WS 전송이 꺼져 있으면 이 빈은 없다. */
+    private final org.springframework.beans.factory.ObjectProvider<WebSocketSessionRegistry> webSocketSessionRegistry;
 
     // 현재 서버 인스턴스에서 관리 중인 세션 목록
     private final java.util.Set<String> localSessions = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -101,14 +105,36 @@ public class PresenceSessionManager {
         final String finalUserId = userId;
         broadcastUpdate(rootId, ACTION_CREATE, userId);
 
-        CompletableFuture.delayedExecutor(presenceProperties.getBroadcastDelay(), TimeUnit.MILLISECONDS).execute(() -> {
+        // 지연의 이유는 STOMP 의 구독 경합이다: SUBSCRIBE 프레임을 서버가 처리 중일 때 보낸 메시지는
+        // 구독 등록 전이라 그대로 버려질 수 있어서, 클라이언트 쪽 처리가 끝나길 기다렸다.
+        // raw WebSocket 에는 구독이라는 단계가 없다 — Join 을 받은 시점에 세션은 이미 룸에 있다.
+        // 지연은 STOMP 세션에만 필요하다. transport=both 면 세션마다 갈린다 — raw WS 레지스트리에
+        // 있는 세션이면 이미 룸에 들어와 있으므로 기다릴 이유가 없다.
+        long delay = isRawWebSocketSession(sessionId) ? 0L : presenceProperties.getBroadcastDelay();
+        Runnable sendInitial = () -> {
             try {
                 log.debug("[PresenceManager] Sending initial message to session: sessionId={}", sessionId);
                 sendToSession(rootId, sessionId, ACTION_CREATE, finalUserId);
             } catch (Exception e) {
                 log.warn("Failed to send initial presence message", e);
             }
-        });
+        };
+        if (delay <= 0) {
+            sendInitial.run();
+        } else {
+            CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(sendInitial);
+        }
+    }
+
+    private boolean isRawWebSocketSession(String sessionId) {
+        if (!webSocketProperties.isRawWebSocket()) {
+            return false;
+        }
+        if (!webSocketProperties.isBoth()) {
+            return true;
+        }
+        WebSocketSessionRegistry registry = webSocketSessionRegistry.getIfAvailable();
+        return registry != null && registry.session(sessionId) != null;
     }
 
     /**
@@ -149,15 +175,22 @@ public class PresenceSessionManager {
         }
     }
 
+    /**
+     * 진행 중인 DB flush 가 끝나기를 기다린다.
+     *
+     * 폴링이라 최악의 경우 attempts × interval 만큼 호출 스레드를 잡는다. 이 메서드는 Join 경로에
+     * 있으므로, raw WebSocket 에서는 반드시 프레임 실행기 스레드에서 호출되어야 한다
+     * (컨테이너 읽기 스레드에서 부르면 그 소켓이 그 시간만큼 먹통이 된다).
+     */
     private void waitForSyncCompletion(String rootId) {
         int retryCount = 0;
-        int maxRetries = 10;
+        int maxRetries = presenceProperties.getSyncWaitAttempts();
         while (retryCount < maxRetries) {
             // SYNC_LOCK이 걸려있는지 확인
             if (!presenceStorage.acquireSyncLock(rootId)) {
                 log.info("[PresenceManager] Sync in progress for rootId={}. Waiting...", rootId);
                 try {
-                    Thread.sleep(500);
+                    Thread.sleep(presenceProperties.getSyncWaitIntervalMs());
                     retryCount++;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -166,9 +199,13 @@ public class PresenceSessionManager {
             } else {
                 // 락을 획득했다는 것은 현재 동기화 중이 아니라는 뜻이므로 바로 해제
                 presenceStorage.releaseSyncLock(rootId);
-                break;
+                return;
             }
         }
+        // 여기까지 왔다면 기다림을 포기한 것이다. 캐시가 flush 중인 상태에서 입장을 계속 진행하므로
+        // 조용히 넘어가면 안 된다.
+        log.warn("[PresenceManager] 동기화 대기 시간 초과 rootId={} ({}회 × {}ms). 그대로 입장을 진행한다.",
+                rootId, maxRetries, presenceProperties.getSyncWaitIntervalMs());
     }
 
     private void syncToDatabaseIfLocked(String rootId) {

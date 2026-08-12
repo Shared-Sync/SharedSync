@@ -23,6 +23,7 @@ import com.sharedsync.shared.presence.core.PresenceRootResolver;
 import com.sharedsync.shared.presence.core.UserProvider;
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 import com.sharedsync.shared.properties.SharedSyncPresenceProperties;
+import com.sharedsync.shared.properties.SharedSyncWebSocketProperties;
 import com.sharedsync.shared.storage.PresenceStorage;
 import com.sharedsync.shared.sync.CacheSyncService;
 
@@ -47,6 +48,9 @@ class PresenceSessionManagerTest {
     private SharedSyncAuthProperties authProperties;
     @Mock
     private SharedSyncPresenceProperties presenceProperties;
+    /** 초기 스냅샷 지연을 transport 에 따라 다르게 주므로 필요하다 (raw WS 는 지연 없음). */
+    @Mock
+    private SharedSyncWebSocketProperties webSocketProperties;
 
     @InjectMocks
     private PresenceSessionManager presenceSessionManager;
@@ -65,6 +69,9 @@ class PresenceSessionManagerTest {
         given(presenceRootResolver.getChannel()).willReturn("shared-group");
         given(presenceProperties.getSessionTimeout()).willReturn(30000L);
         given(presenceProperties.getBroadcastDelay()).willReturn(10L);
+        // 동기화 대기 횟수가 0 이면 대기 자체를 건너뛴다. 목 기본값이 0 이라 명시하지 않으면
+        // acquireSyncLock 경로가 실행되지 않는다.
+        given(presenceProperties.getSyncWaitAttempts()).willReturn(10);
 
         Map<String, Object> mockUserInfo = new HashMap<>();
         mockUserInfo.put("nickname", "tester");

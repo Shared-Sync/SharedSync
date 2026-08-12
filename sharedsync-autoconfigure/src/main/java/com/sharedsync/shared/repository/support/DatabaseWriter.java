@@ -86,7 +86,8 @@ public final class DatabaseWriter<T, ID, DTO extends CacheDto<ID>> {
                 T managed = em.contains(entity) ? entity : em.merge(entity);
                 em.remove(managed);
             } catch (jakarta.persistence.OptimisticLockException | org.hibernate.StaleObjectStateException e) {
-                // 이미 삭제된 경우 무시
+                // 다른 트랜잭션이 이미 지운 행이다. 삭제가 목적이므로 결과는 같다.
+                log.debug("[DatabaseWriter] 이미 삭제된 엔티티 무시: {}", e.getMessage());
             }
         }
     }

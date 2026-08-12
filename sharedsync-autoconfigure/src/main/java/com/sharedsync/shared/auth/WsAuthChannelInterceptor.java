@@ -8,14 +8,12 @@ import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.MessageHeaderAccessor;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 
 import com.sharedsync.shared.properties.SharedSyncAuthProperties;
 
 import lombok.RequiredArgsConstructor;
 
-@Component
 @RequiredArgsConstructor
 public class WsAuthChannelInterceptor implements ChannelInterceptor {
 
@@ -47,12 +45,12 @@ public class WsAuthChannelInterceptor implements ChannelInterceptor {
     private void handleConnect(StompHeaderAccessor acc) {
         String auth = firstNative(acc, "Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) {
-            throw new AccessDeniedException("Missing Authorization");
+            throw new SyncAccessDeniedException("Missing Authorization");
         }
 
         String token = auth.substring(7);
         if (!tokenResolver.validate(token)) {
-            throw new AccessDeniedException("Invalid token");
+            throw new SyncAccessDeniedException("Invalid token");
         }
 
         String userId = tokenResolver.extractPrincipalId(token);
@@ -74,7 +72,7 @@ public class WsAuthChannelInterceptor implements ChannelInterceptor {
 
         Principal p = acc.getUser();
         if (p == null)
-            throw new AccessDeniedException("Unauthenticated");
+            throw new SyncAccessDeniedException("Unauthenticated");
 
         String userId = ((StompPrincipal) p).userId();
 

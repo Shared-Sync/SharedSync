@@ -3,17 +3,11 @@ package com.sharedsync.shared.presence.core;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-import org.reflections.Reflections;
-import org.springframework.stereotype.Component;
-
-import com.sharedsync.shared.context.FrameworkContext;
 import com.sharedsync.shared.presence.annotation.PresenceUser;
 
 import jakarta.annotation.PostConstruct;
 
-@Component
 public class PresenceUserRegistry {
 
     private Class<?> userClass;
@@ -22,13 +16,18 @@ public class PresenceUserRegistry {
 
     @PostConstruct
     public void init() {
-        String basePackage = FrameworkContext.getBasePackage();
-        Reflections reflections = new Reflections(basePackage);
+        // 런타임 클래스패스 스캔 대신 컴파일 시점에 기록된 이름을 쓴다.
+        String userClassName = PresenceRootResolver.metadataField("USER_CLASS");
+        if (userClassName == null) {
+            // @PresenceUser 가 없는 앱도 있다. 프레즌스 사용자 정보만 비게 된다.
+            return;
+        }
+        try {
+            userClass = Class.forName(userClassName);
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException("@PresenceUser 클래스를 로드할 수 없다: " + userClassName, e);
+        }
 
-        Set<Class<?>> annotated = reflections.getTypesAnnotatedWith(PresenceUser.class);
-        if (annotated.isEmpty()) return;
-
-        userClass = annotated.iterator().next();
         PresenceUser ann = userClass.getAnnotation(PresenceUser.class);
         try {
             // ID 필드 찾기

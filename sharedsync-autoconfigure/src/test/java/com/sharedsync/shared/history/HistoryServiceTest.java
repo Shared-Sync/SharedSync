@@ -20,6 +20,7 @@ import org.springframework.messaging.simp.SimpAttributesContextHolder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sharedsync.shared.repository.AutoCacheRepository;
 import com.sharedsync.shared.sync.RedisSyncService;
+import com.sharedsync.shared.transport.SyncSessionContext;
 
 @ExtendWith(MockitoExtension.class)
 class HistoryServiceTest {
@@ -39,12 +40,22 @@ class HistoryServiceTest {
     @Mock
     private ObjectMapper objectMapper;
 
+    /**
+     * 세션 조회는 이제 transport 중립 경계를 거친다. 예전에는 HistoryService 가
+     * SimpAttributesContextHolder(STOMP 전용)를 직접 봤다.
+     */
+    @Mock
+    private SyncSessionContext sessionContext;
+
     @InjectMocks
     private HistoryService historyService;
 
     @BeforeEach
     void setUp() {
-        // Set up mock SimpAttributes for getCurrentSessionId()
+        // STOMP 경로에서 SimpAttributes 가 하던 역할. 여기서 null 이면 record() 가 예외 없이
+        // 早期 return 하므로, 세션이 비었을 때의 조용한 실패를 테스트가 못 잡게 된다.
+        lenient().when(sessionContext.currentSessionId()).thenReturn("test-session-id");
+
         SimpAttributes simpAttributes = mock(SimpAttributes.class);
         lenient().when(simpAttributes.getSessionId()).thenReturn("test-session-id");
         SimpAttributesContextHolder.setAttributes(simpAttributes);

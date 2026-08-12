@@ -66,6 +66,32 @@ public class SharedSyncPresenceProperties {
         this.broadcastDelay = broadcastDelay;
     }
 
+    /**
+     * 진행 중인 DB 동기화를 기다리는 폴링 횟수와 간격(ms).
+     *
+     * 이 대기는 입장(Join) 경로를 그 시간만큼 붙잡는다. 예전에는 500ms × 10회가 코드에 박혀 있어
+     * 최악의 경우 5초를 잡았고, 그게 어디를 막는지 조정할 방법도 없었다.
+     */
+    private int syncWaitAttempts = 10;
+
+    private long syncWaitIntervalMs = 500;
+
+    public int getSyncWaitAttempts() {
+        return syncWaitAttempts;
+    }
+
+    public void setSyncWaitAttempts(int syncWaitAttempts) {
+        this.syncWaitAttempts = syncWaitAttempts;
+    }
+
+    public long getSyncWaitIntervalMs() {
+        return syncWaitIntervalMs;
+    }
+
+    public void setSyncWaitIntervalMs(long syncWaitIntervalMs) {
+        this.syncWaitIntervalMs = syncWaitIntervalMs;
+    }
+
     public long getSyncDelay() {
         return syncDelay;
     }

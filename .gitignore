@@ -93,3 +93,6 @@ Thumbs.db
 # AI 작업용 로컬 문서 (커밋 안 함)
 # ==========================
 project_ai/
+
+# Eclipse/VSCode 빌드 출력물. src/main/resources 의 진짜 META-INF 사본이 여기 생겨 헷갈린다.
+bin/

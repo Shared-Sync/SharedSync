@@ -22,7 +22,6 @@ import lombok.extern.slf4j.Slf4j;
  * 디스커넥트 시에만 동기화하던 방식에 추가로, 연결 중에도 주기적으로
  * 캐시 데이터를 DB에 백업합니다. 이때 캐시는 삭제되지 않습니다 (keepCache=true).
  */
-@Component
 @RequiredArgsConstructor
 @Slf4j
 public class PeriodicSyncScheduler {

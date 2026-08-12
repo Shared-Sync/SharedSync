@@ -30,7 +30,9 @@ public final class ProtoDescriptorBuilder {
     public static FileDescriptorProto build(List<CacheInformation> cacheInfoList,
                                              String protoPackage,
                                              String protoFile,
-                                             ProtoTypeMapper mapper) {
+                                             ProtoTypeMapper mapper,
+                                             java.util.Map<String, Integer> numbers,
+                                             java.util.Map<String, List<Integer>> reserved) {
         FileDescriptorProto.Builder file = FileDescriptorProto.newBuilder()
                 .setName(protoFile)
                 .setSyntax("proto3")
@@ -43,7 +45,8 @@ public final class ProtoDescriptorBuilder {
         DescriptorProto[] listMessages = new DescriptorProto[cacheInfoList.size()];
         for (int i = 0; i < cacheInfoList.size(); i++) {
             CacheInformation info = cacheInfoList.get(i);
-            entityMessages[i] = entityMessage(info, protoPackage, mapper);
+            entityMessages[i] = entityMessage(info, protoPackage, mapper, numbers,
+                    reserved.getOrDefault(info.getEntityName(), List.of()));
             listMessages[i] = listMessage(info.getEntityName(), protoPackage);
         }
 
@@ -93,11 +96,19 @@ public final class ProtoDescriptorBuilder {
     // ==========================================
     // messages
     // ==========================================
-    private static DescriptorProto entityMessage(CacheInformation info, String protoPackage, ProtoTypeMapper mapper) {
+    private static DescriptorProto entityMessage(CacheInformation info, String protoPackage,
+                                                 ProtoTypeMapper mapper,
+                                                 java.util.Map<String, Integer> numbers,
+                                                 List<Integer> reserved) {
         DescriptorProto.Builder message = DescriptorProto.newBuilder().setName(info.getEntityName());
 
+        // 제거된 필드의 번호. 텍스트의 reserved 와 같은 내용이어야 한다.
+        for (int slot : reserved) {
+            message.addReservedRange(DescriptorProto.ReservedRange.newBuilder()
+                    .setStart(slot).setEnd(slot + 1));
+        }
+
         List<WireField> fields = WireFieldResolver.resolve(info);
-        int number = 1;
         int syntheticOneofIndex = 0;
 
         for (WireField field : fields) {
@@ -107,7 +118,7 @@ public final class ProtoDescriptorBuilder {
 
             FieldDescriptorProto.Builder fd = FieldDescriptorProto.newBuilder()
                     .setName(field.getProtoName())
-                    .setNumber(number++);
+                    .setNumber(numbers.get(info.getEntityName() + "." + field.getProtoName()));
 
             applyType(fd, protoType, protoPackage);
 

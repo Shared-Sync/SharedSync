@@ -135,6 +135,16 @@ public class HistoryService {
     }
 
     private void publishChange(String rootId, HistoryAction action, boolean isUndo) {
+        if (action.getType() == HistoryAction.Type.COMPOSITE) {
+            // 컨테이너 자체는 publish 할 실체 DTO 변경이 없다 — subActions 만 그대로 재귀.
+            if (action.getSubActions() != null) {
+                for (HistoryAction subAction : action.getSubActions()) {
+                    publishChange(rootId, subAction, isUndo);
+                }
+            }
+            return;
+        }
+
         if (redisSyncService == null || action.getEntityName() == null)
             return;
 
@@ -147,11 +157,13 @@ public class HistoryService {
                 case CREATE -> "DELETE";
                 case UPDATE -> "UPDATE";
                 case DELETE -> "CREATE";
+                case COMPOSITE -> null; // 위에서 이미 early-return 됨 — 컴파일러의 enum 전수 커버 요구를 채우는 죽은 분기
             };
             data = switch (type) {
                 case CREATE -> action.getAfterData();
                 case UPDATE -> action.getBeforeData();
                 case DELETE -> action.getBeforeData();
+                case COMPOSITE -> null; // 도달 불가
             };
         } else {
             broadcastAction = type.name();
@@ -159,6 +171,7 @@ public class HistoryService {
                 case CREATE -> action.getAfterData();
                 case UPDATE -> action.getAfterData();
                 case DELETE -> action.getAfterData();
+                case COMPOSITE -> null; // 도달 불가
             };
         }
 
@@ -185,6 +198,17 @@ public class HistoryService {
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private boolean applyInverse(HistoryAction action) {
+        if (action.getType() == HistoryAction.Type.COMPOSITE) {
+            // 컨테이너 자체엔 되돌릴 실체가 없다 — 항상 통과하고 subActions 를 각자 독립적으로 되돌린다.
+            // (subActions 루프는 아래처럼 리턴값을 안 보므로, 하나가 상태불일치로 no-op 이어도 나머지는 진행된다)
+            if (action.getSubActions() != null) {
+                for (HistoryAction subAction : action.getSubActions()) {
+                    applyInverse(subAction);
+                }
+            }
+            return true;
+        }
+
         AutoCacheRepository repo = findRepository(action.getDtoClassName());
         if (repo == null)
             return false;
@@ -234,6 +258,16 @@ public class HistoryService {
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private boolean applyAction(HistoryAction action) {
+        if (action.getType() == HistoryAction.Type.COMPOSITE) {
+            // applyInverse 와 대칭 — redo 도 컨테이너 자체는 통과, subActions 만 각자 독립적으로 재적용.
+            if (action.getSubActions() != null) {
+                for (HistoryAction subAction : action.getSubActions()) {
+                    applyAction(subAction);
+                }
+            }
+            return true;
+        }
+
         AutoCacheRepository repo = findRepository(action.getDtoClassName());
         if (repo == null)
             return false;

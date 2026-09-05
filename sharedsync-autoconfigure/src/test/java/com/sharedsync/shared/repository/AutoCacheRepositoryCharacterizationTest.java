@@ -199,6 +199,42 @@ public class AutoCacheRepositoryCharacterizationTest {
                 eq(childId.toString()));
     }
 
+    @Test
+    void update_movesChildToDifferentParent_updatesBothParentIndexEntries() throws Exception {
+        // mergeDto()가 existingDto를 제자리에서 덮어써 반환하는 탓에, update()가 병합 *후*의
+        // existingDto를 다시 읽어 "옛 부모 값"으로 삼으면 oldId==newId가 되어 인덱스 갱신이
+        // 통째로 스킵되던 버그의 회귀 테스트.
+        ChildRepository repo = inject(new ChildRepository());
+
+        UUID childId = UUID.randomUUID();
+        UUID oldParentId = UUID.randomUUID();
+        UUID newParentId = UUID.randomUUID();
+
+        ChildDto existing = new ChildDto();
+        existing.id = childId;
+        existing.parentId = oldParentId;
+
+        ChildDto incoming = new ChildDto();
+        incoming.id = childId;
+        incoming.parentId = newParentId;
+
+        lenient().when(cacheStore.hashGet(eq("child:DATA"), eq(childId.toString()))).thenReturn(existing);
+        lenient().when(cacheStore.hashGetString(eq("child:DATA"), eq("P_IDX:ParentEntity:" + oldParentId)))
+                .thenReturn(childId.toString());
+        lenient().when(cacheStore.hashGetString(eq("child:DATA"), eq("P_IDX:ParentEntity:" + newParentId)))
+                .thenReturn(null);
+
+        repo.update(incoming);
+
+        // 옛 부모 인덱스에서 자신을 제거(마지막 하나였으므로 필드 자체 삭제)
+        verify(cacheStore).hashDelete(eq("child:DATA"), eq("P_IDX:ParentEntity:" + oldParentId));
+        // 새 부모 인덱스에 자신을 추가
+        verify(cacheStore).hashSetString(
+                eq("child:DATA"),
+                eq("P_IDX:ParentEntity:" + newParentId),
+                eq(childId.toString()));
+    }
+
     // ===== 테스트용 엔티티/DTO/리포지토리 =====
 
     public static class UuidEntity {

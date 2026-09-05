@@ -477,9 +477,21 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
         String hashKey = getRedisKey(id);
         removeFromDeletedSet(id);
         DTO existingDto = getCacheStore().hashGet(hashKey, String.valueOf(id));
-        List<Object> oldParentIds = Collections.emptyList();
+
+        // mergeDto()는 existingDto 를 제자리에서 덮어쓰고 그 객체를 그대로 반환한다(dto == existingDto 가 됨).
+        // 그래서 병합 *이후*에 existingDto 의 필드를 읽으면 이미 새 값이 나와, 아래 인덱스 갱신이
+        // "안 바뀜"으로 오판해 부모 인덱스가 절대 갱신되지 않는 문제가 있었다. 병합 전에 부모 필드 값을
+        // 따로 캡처해 둔다.
+        Map<Field, Object> oldParentFieldValues = Collections.emptyMap();
         if (existingDto != null) {
-            oldParentIds = extractParentIds(existingDto);
+            oldParentFieldValues = new java.util.HashMap<>();
+            for (Field field : parentEntityClassMap.keySet()) {
+                try {
+                    oldParentFieldValues.put(field, field.get(existingDto));
+                } catch (IllegalAccessException e) {
+                    // ignore
+                }
+            }
             dto = mergeDto(existingDto, dto);
         }
 
@@ -490,7 +502,7 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
             Field field = entry.getKey();
             Class<?> parentClass = entry.getValue();
             try {
-                Object oldId = (existingDto != null) ? field.get(existingDto) : null;
+                Object oldId = (existingDto != null) ? oldParentFieldValues.get(field) : null;
                 Object newId = field.get(dto);
 
                 if (oldId != null && !Objects.equals(oldId, newId)) {

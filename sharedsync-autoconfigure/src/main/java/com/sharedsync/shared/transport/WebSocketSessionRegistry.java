@@ -29,6 +29,9 @@ public class WebSocketSessionRegistry {
     private static final int SEND_TIME_LIMIT_MS = 10_000;
     private static final int BUFFER_SIZE_LIMIT_BYTES = 512 * 1024;
 
+    /** 핸드셰이크 인터셉터가 세션 attribute 에 채워두는 키(JwtHandshakeInterceptor 참고). */
+    private static final String USER_ID_ATTR = "userId";
+
     /** sessionId -> 감싼 세션 */
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
 
@@ -86,6 +89,33 @@ public class WebSocketSessionRegistry {
 
     public WebSocketSession session(String sessionId) {
         return sessions.get(sessionId);
+    }
+
+    /**
+     * 이 룸에서 이 유저 소유의(핸드셰이크 시점에 세션 attribute 에 박힌 {@code userId} 가 일치하는)
+     * 살아있는 세션 id 들.
+     *
+     * <p>REST 경로가 "지금 이 유저가 이 방에 열어둔 세션"을 스스로 찾아야 할 때 쓴다(예: 챗봇 [반영] —
+     * 클라이언트가 자기 raw-WS sessionId 를 몰라도(wire 프로토콜에 이를 클라이언트에게 알려주는
+     * 수단이 없음) v2 가 신원 기준으로 세션을 찾아 undo 컨텍스트에 바인딩할 수 있다).
+     *
+     * <p>같은 유저가 같은 방을 여러 세션(탭/기기)으로 열어두면 여러 개가 돌아올 수 있다 — 어느
+     * 세션을 쓸지는 호출자 책임이다(트레이드오프는 이 메서드를 쓰는 앱 쪽 설계 문서 참고).
+     *
+     * @return 없으면 빈 Set(그 방 자체가 없거나 이 유저의 세션이 없음)
+     */
+    public Set<String> sessionIdsOf(String roomId, String userId) {
+        Set<String> members = roomSessions.get(roomId);
+        if (members == null || members.isEmpty()) {
+            return Set.of();
+        }
+        return members.stream()
+                .filter(id -> {
+                    WebSocketSession session = sessions.get(id);
+                    return session != null
+                            && userId.equals(String.valueOf(session.getAttributes().get(USER_ID_ATTR)));
+                })
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     public Set<String> localSessionIds() {

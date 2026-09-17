@@ -42,6 +42,9 @@ public final class IdTypeConverter<T, ID> {
         if (idClass.getSimpleName().equals("Long")) {
             return (ID) Long.valueOf(id.toString());
         }
+        if (idClass.getSimpleName().equals("BigInteger")) {
+            return (ID) new java.math.BigInteger(id.toString());
+        }
         if (idClass.getSimpleName().equals("UUID")) {
             return (ID) java.util.UUID.fromString(id.toString());
         }
@@ -74,6 +77,8 @@ public final class IdTypeConverter<T, ID> {
                 return Short.valueOf(s);
             if (targetType == Byte.class || targetType == byte.class)
                 return Byte.valueOf(s);
+            if (targetType == java.math.BigInteger.class)
+                return new java.math.BigInteger(s);
             if (targetType == java.util.UUID.class)
                 return java.util.UUID.fromString(s);
         } catch (Exception e) {
@@ -97,6 +102,8 @@ public final class IdTypeConverter<T, ID> {
                 return (ID) Long.valueOf(idStr);
             } else if (idClass.equals(Integer.class) || idClass.equals(int.class)) {
                 return (ID) Integer.valueOf(idStr);
+            } else if (idClass.equals(java.math.BigInteger.class)) {
+                return (ID) new java.math.BigInteger(idStr);
             }
         } catch (Exception e) {
             throw new IllegalArgumentException("ID 변환 실패: " + idStr + " to " + idClass.getSimpleName());

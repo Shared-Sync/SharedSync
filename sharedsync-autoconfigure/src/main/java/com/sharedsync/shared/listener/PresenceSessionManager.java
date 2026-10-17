@@ -217,37 +217,71 @@ public class PresenceSessionManager {
 
             cancelPendingSyncTask(rootId); // 기존 작업이 있다면 취소
 
-            ScheduledFuture<?> future = scheduler.schedule(() -> {
-                try {
-                    log.info("[PresenceManager] [TRACE-F5] Executing scheduled sync for rootId={}", rootId);
-                    executeSyncWithLock(rootId);
-                } finally {
-                    pendingSyncTasks.remove(rootId);
-                }
-            }, presenceProperties.getSyncDelay(), TimeUnit.SECONDS);
-
-            pendingSyncTasks.put(rootId, future);
+            scheduleSync(rootId, 0, TimeUnit.SECONDS.toMillis(presenceProperties.getSyncDelay()));
         } else {
             // 지연 설정이 없으면 즉시 실행
             log.info("[PresenceManager] [TRACE-F5] No sync delay configured. Executing sync immediately for rootId={}",
                     rootId);
-            executeSyncWithLock(rootId);
+            executeSyncWithLock(rootId, 0);
         }
     }
 
-    private void executeSyncWithLock(String rootId) {
-        if (presenceStorage.acquireSyncLock(rootId)) {
+    /**
+     * 퇴장 동기화를 예약한다. 재시도도 같은 경로로 예약해, 재접속 시 {@link #cancelPendingSyncTask} 로 함께 취소된다.
+     * 스케줄러 스레드가 하나라서 재시도를 sleep 으로 기다리지 않고 다시 예약한다.
+     */
+    private void scheduleSync(String rootId, int attempt, long delayMillis) {
+        java.util.concurrent.atomic.AtomicReference<ScheduledFuture<?>> self = new java.util.concurrent.atomic.AtomicReference<>();
+        ScheduledFuture<?> future = scheduler.schedule(() -> {
             try {
-                // 실제 실행 시점에 여전히 유저가 없는지 다시 확인
-                if (!presenceStorage.hasTracker(rootId)) {
-                    log.info("[PresenceManager] Executing delayed sync for rootId={}", rootId);
-                    cacheSyncService.syncToDatabase(rootId);
-                } else {
-                    log.info("[PresenceManager] Sync skipped for rootId={} (user re-connected)", rootId);
-                }
+                log.info("[PresenceManager] [TRACE-F5] Executing scheduled sync for rootId={}", rootId);
+                executeSyncWithLock(rootId, attempt);
             } finally {
-                presenceStorage.releaseSyncLock(rootId);
+                // 재시도를 새로 예약했으면 그 예약은 남겨야 하므로, 자기 자신일 때만 지운다.
+                ScheduledFuture<?> mine = self.get();
+                if (mine != null) {
+                    pendingSyncTasks.remove(rootId, mine);
+                }
             }
+        }, delayMillis, TimeUnit.MILLISECONDS);
+        self.set(future);
+        pendingSyncTasks.put(rootId, future);
+    }
+
+    private void executeSyncWithLock(String rootId, int attempt) {
+        java.util.Optional<String> token = presenceStorage.tryAcquireSyncLock(rootId,
+                presenceProperties.getSyncLockTtlMs());
+        if (token.isEmpty()) {
+            // 예전에는 여기서 그냥 끝나, 마침 주기 동기화가 잠금을 쥔 순간 나간 방은 마지막 동기화가 사라졌다.
+            if (presenceStorage.hasTracker(rootId)) {
+                log.info("[PresenceManager] Sync skipped for rootId={} (user re-connected)", rootId);
+                return;
+            }
+            int maxAttempts = presenceProperties.getSyncLockRetryAttempts();
+            if (attempt + 1 < maxAttempts) {
+                log.info("[PresenceManager] Sync lock busy for rootId={}. Retrying ({}/{})", rootId, attempt + 1,
+                        maxAttempts - 1);
+                scheduleSync(rootId, attempt + 1, presenceProperties.getSyncLockRetryIntervalMs());
+            } else {
+                log.error("[PresenceManager] 동기화 잠금을 얻지 못해 퇴장 동기화를 포기했다 rootId={} ({}회). "
+                        + "캐시는 남아 있고 DB에는 마지막 주기 동기화까지만 반영돼 있다.", rootId, maxAttempts);
+            }
+            return;
+        }
+        try {
+            // 실제 실행 시점에 여전히 유저가 없는지 다시 확인
+            if (!presenceStorage.hasTracker(rootId)) {
+                log.info("[PresenceManager] Executing delayed sync for rootId={}", rootId);
+                cacheSyncService.syncToDatabase(rootId);
+            } else {
+                log.info("[PresenceManager] Sync skipped for rootId={} (user re-connected)", rootId);
+            }
+        } catch (Exception e) {
+            // 예약 작업 안에서 던지면 ScheduledFuture 에 묻혀 아무 흔적도 남지 않았다.
+            // 롤백됐으므로 캐시와 삭제 추적은 그대로 남아 있다.
+            log.error("[PresenceManager] 퇴장 동기화 실패 rootId={}: {}", rootId, e.getMessage(), e);
+        } finally {
+            presenceStorage.releaseSyncLock(rootId, token.get());
         }
     }
 

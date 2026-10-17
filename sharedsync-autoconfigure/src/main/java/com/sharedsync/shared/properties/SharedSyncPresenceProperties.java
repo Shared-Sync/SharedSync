@@ -126,4 +126,65 @@ public class SharedSyncPresenceProperties {
     public void setPeriodicSyncEnabled(boolean periodicSyncEnabled) {
         this.periodicSyncEnabled = periodicSyncEnabled;
     }
+
+    /**
+     * 동기화 잠금(PRESENCE:SYNC_LOCK)의 유지 시간(ms). 기본값 30초 — 예전 고정값과 같다.
+     * 동기화가 이보다 오래 걸리면 잠금이 먼저 풀려 다른 동기화와 겹칠 수 있으므로,
+     * {@link #slowSyncWarnMs} 를 넘기면 경고를 남긴다.
+     */
+    private long syncLockTtlMs = 30_000;
+
+    /**
+     * 퇴장 동기화가 잠금을 못 잡았을 때 다시 시도하는 횟수와 간격(ms).
+     * 예전에는 재시도 없이 건너뛰어, 마침 주기 동기화가 잠금을 쥔 순간 나간 방은 마지막 동기화가 사라졌다.
+     */
+    private int syncLockRetryAttempts = 10;
+
+    private long syncLockRetryIntervalMs = 1_000;
+
+    /** 동기화 한 번이 이 시간(ms)을 넘기면 경고한다. 잠금 TTL 에 가까워지는 걸 미리 알기 위함. */
+    private long slowSyncWarnMs = 10_000;
+
+    /** 같은 방의 동기화가 이 횟수 이상 연속 실패하면 ERROR 로 알린다. 동작은 바꾸지 않는다. */
+    private int syncFailureAlertThreshold = 3;
+
+    public long getSyncLockTtlMs() {
+        return syncLockTtlMs;
+    }
+
+    public void setSyncLockTtlMs(long syncLockTtlMs) {
+        this.syncLockTtlMs = syncLockTtlMs;
+    }
+
+    public int getSyncLockRetryAttempts() {
+        return syncLockRetryAttempts;
+    }
+
+    public void setSyncLockRetryAttempts(int syncLockRetryAttempts) {
+        this.syncLockRetryAttempts = syncLockRetryAttempts;
+    }
+
+    public long getSyncLockRetryIntervalMs() {
+        return syncLockRetryIntervalMs;
+    }
+
+    public void setSyncLockRetryIntervalMs(long syncLockRetryIntervalMs) {
+        this.syncLockRetryIntervalMs = syncLockRetryIntervalMs;
+    }
+
+    public long getSlowSyncWarnMs() {
+        return slowSyncWarnMs;
+    }
+
+    public void setSlowSyncWarnMs(long slowSyncWarnMs) {
+        this.slowSyncWarnMs = slowSyncWarnMs;
+    }
+
+    public int getSyncFailureAlertThreshold() {
+        return syncFailureAlertThreshold;
+    }
+
+    public void setSyncFailureAlertThreshold(int syncFailureAlertThreshold) {
+        this.syncFailureAlertThreshold = syncFailureAlertThreshold;
+    }
 }

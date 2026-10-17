@@ -210,7 +210,29 @@ public class InMemoryPresenceStorage implements PresenceStorage {
     @Override
     public void releaseSyncLock(String rootId) {
         boolean removed = syncLocks.remove(rootId);
+        syncLockTokens.remove(rootId);
         if (removed) {
+            notifySyncComplete(rootId);
+        }
+    }
+
+    /** 단일 JVM 이라 만료는 두지 않는다(예전 acquireSyncLock 과 같음). 토큰은 소유 확인용. */
+    private final Map<String, String> syncLockTokens = new ConcurrentHashMap<>();
+
+    @Override
+    public java.util.Optional<String> tryAcquireSyncLock(String rootId, long ttlMillis) {
+        if (!syncLocks.add(rootId)) {
+            return java.util.Optional.empty();
+        }
+        String token = java.util.UUID.randomUUID().toString();
+        syncLockTokens.put(rootId, token);
+        return java.util.Optional.of(token);
+    }
+
+    @Override
+    public void releaseSyncLock(String rootId, String token) {
+        if (token != null && syncLockTokens.remove(rootId, token)) {
+            syncLocks.remove(rootId);
             notifySyncComplete(rootId);
         }
     }

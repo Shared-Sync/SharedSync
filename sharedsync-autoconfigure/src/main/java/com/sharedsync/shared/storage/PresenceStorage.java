@@ -42,6 +42,24 @@ public interface PresenceStorage {
 
     void releaseSyncLock(String rootId);
 
+    /**
+     * 소유 토큰을 가진 동기화 잠금을 잡는다. 성공하면 토큰, 이미 잠겨 있으면 빈 값.
+     *
+     * <p>{@link #releaseSyncLock(String, String)} 은 토큰이 같을 때만 푼다. 예전 {@link #releaseSyncLock(String)}
+     * 은 조건 없이 지워서, 잠금이 만료돼 다른 동기화가 다시 잡은 잠금까지 지울 수 있었다. 키는 예전과 같아
+     * 구버전 인스턴스의 {@link #acquireSyncLock(String)} 과도 서로 배제된다.</p>
+     *
+     * <p>기본 구현은 예전 잠금으로 대신한다(커스텀 구현체 호환용).</p>
+     */
+    default java.util.Optional<String> tryAcquireSyncLock(String rootId, long ttlMillis) {
+        return acquireSyncLock(rootId) ? java.util.Optional.of("legacy") : java.util.Optional.empty();
+    }
+
+    /** 토큰이 같을 때만 잠금을 풀고 동기화 완료를 알린다. */
+    default void releaseSyncLock(String rootId, String token) {
+        releaseSyncLock(rootId);
+    }
+
     void setIsLoading(String rootId, boolean isLoading);
 
     boolean isLoading(String rootId);

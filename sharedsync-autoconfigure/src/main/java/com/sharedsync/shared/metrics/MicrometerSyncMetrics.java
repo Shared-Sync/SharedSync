@@ -51,6 +51,16 @@ public class MicrometerSyncMetrics implements SyncMetrics {
         rejected.increment();
     }
 
+    private final Map<String, Counter> syncFailureCounters = new ConcurrentHashMap<>();
+
+    @Override
+    public void syncFailure(String kind) {
+        syncFailureCounters.computeIfAbsent(kind, k -> Counter.builder("sharedsync.sync.failures")
+                .tag("kind", k)
+                .description("캐시→DB 동기화 실패")
+                .register(registry)).increment();
+    }
+
     @Override
     public void error(String code) {
         errorCounters.computeIfAbsent(code, c -> Counter.builder("sharedsync.errors")

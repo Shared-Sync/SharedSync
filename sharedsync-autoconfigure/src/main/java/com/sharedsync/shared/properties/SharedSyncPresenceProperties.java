@@ -207,6 +207,21 @@ public class SharedSyncPresenceProperties {
     /** 퇴장 동기화 예약 표시(PRESENCE:PENDING_SYNC)의 유지 시간(ms). 퇴장 지연 + 잠금 재시도 전체보다 길어야 한다. */
     private long pendingSyncMarkerTtlMs = 60_000;
 
+    /**
+     * 동기화 트랜잭션에서 캐시 엔티티 테이블의 유니크 제약을 커밋 때 검사하게 할지. 앱이 제약을
+     * {@code DEFERRABLE INITIALLY IMMEDIATE} 로 선언한 경우에만 효과가 있다(PostgreSQL). 켜 두면 행을 쓰는 순서
+     * 때문에 최종 상태가 정상인 편집이 유니크 제약에 걸리지 않는다.
+     */
+    private boolean deferUniqueConstraints = true;
+
+    public boolean isDeferUniqueConstraints() {
+        return deferUniqueConstraints;
+    }
+
+    public void setDeferUniqueConstraints(boolean deferUniqueConstraints) {
+        this.deferUniqueConstraints = deferUniqueConstraints;
+    }
+
     public long getSyncFailureCountTtlSeconds() {
         return syncFailureCountTtlSeconds;
     }

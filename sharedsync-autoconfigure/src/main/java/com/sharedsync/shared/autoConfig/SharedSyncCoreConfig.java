@@ -37,6 +37,7 @@ import com.sharedsync.shared.storage.RedisPresenceStorage;
 import com.sharedsync.shared.sync.CacheSyncService;
 import com.sharedsync.shared.sync.PeriodicSyncScheduler;
 import com.sharedsync.shared.sync.RedisSyncService;
+import com.sharedsync.shared.sync.UniqueConstraintDeferral;
 import com.sharedsync.shared.transport.SyncSessionContext;
 
 /**
@@ -144,10 +145,20 @@ public class SharedSyncCoreConfig {
 
     @Bean
     @ConditionalOnMissingBean
+    public UniqueConstraintDeferral uniqueConstraintDeferral(
+            ObjectProvider<List<AutoCacheRepository<?, ?, ?>>> repositories,
+            SharedSyncPresenceProperties presenceProperties) {
+        return new UniqueConstraintDeferral(repositories.getIfAvailable(List::of),
+                presenceProperties.isDeferUniqueConstraints());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public CacheSyncService cacheSyncService(
             ObjectProvider<List<AutoCacheRepository<?, ?, ?>>> repositories,
-            PresenceStorage presenceStorage) {
-        return new CacheSyncService(repositories.getIfAvailable(List::of), presenceStorage);
+            PresenceStorage presenceStorage,
+            UniqueConstraintDeferral uniqueConstraintDeferral) {
+        return new CacheSyncService(repositories.getIfAvailable(List::of), presenceStorage, uniqueConstraintDeferral);
     }
 
     @Bean

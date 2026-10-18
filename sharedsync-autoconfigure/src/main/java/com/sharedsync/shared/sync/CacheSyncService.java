@@ -16,7 +16,6 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import com.sharedsync.shared.repository.AutoCacheRepository;
 import com.sharedsync.shared.storage.PresenceStorage;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -24,6 +23,9 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>루트 하나의 동기화는 한 트랜잭션이고, 다음 순서로 진행한다.</p>
  * <ol>
+ *   <li><b>유니크 제약 지연</b>: 앱이 DEFERRABLE 로 선언한 캐시 엔티티 테이블의 유니크 제약을 커밋 때 검사하게 한다
+ *       ({@link UniqueConstraintDeferral}). 캐시의 최종 상태가 정상이면, 행을 쓰는 순서(캐시 순회 순서) 때문에 중간에
+ *       같은 키가 두 줄이 되어도 실패하지 않는다. 지연 가능한 제약이 없으면 아무것도 하지 않는다.</li>
  *   <li><b>깨끗한 삭제</b>: 추적된 삭제 중 캐시에 살아 있는 DB 자식이 없는 행을 <b>깊은 repo부터</b> 먼저 지운다.
  *       같은 유니크 키로 지우고 다시 추가한 행(예: 같은 날짜를 지우고 새로 추가)의 INSERT 가 기존 행에 걸리지 않게
  *       하기 위해서다. 이런 행은 저장 단계와 서로 영향이 없어 순서만 앞선다.</li>
@@ -39,11 +41,23 @@ import lombok.extern.slf4j.Slf4j;
  * 호출자에게는 예전처럼 정상 반환한다. 이 메서드는 트랜잭션을 직접 시작해야 한다 — 바깥 트랜잭션 안에서
  * 부르면 rollback-only 가 바깥 트랜잭션까지 번진다.</p>
  */
-@RequiredArgsConstructor
 @Slf4j
 public class CacheSyncService {
     private final List<AutoCacheRepository<?, ?, ?>> cacheRepositories;
     private final PresenceStorage presenceStorage;
+    private final UniqueConstraintDeferral constraintDeferral;
+
+    /** 유니크 제약을 미루지 않는다(예전 동작). */
+    public CacheSyncService(List<AutoCacheRepository<?, ?, ?>> cacheRepositories, PresenceStorage presenceStorage) {
+        this(cacheRepositories, presenceStorage, UniqueConstraintDeferral.disabled());
+    }
+
+    public CacheSyncService(List<AutoCacheRepository<?, ?, ?>> cacheRepositories, PresenceStorage presenceStorage,
+            UniqueConstraintDeferral constraintDeferral) {
+        this.cacheRepositories = cacheRepositories;
+        this.presenceStorage = presenceStorage;
+        this.constraintDeferral = constraintDeferral == null ? UniqueConstraintDeferral.disabled() : constraintDeferral;
+    }
 
     /**
      * 캐시 삭제 예약 항목 (커밋 후 일괄 삭제용)
@@ -120,6 +134,9 @@ public class CacheSyncService {
         SyncRun run = new SyncRun(rootId, keepCache);
         List<AutoCacheRepository<?, ?, ?>> deepestFirst = childRepositoriesDeepestFirst();
         List<ProcessedDeletions> processed = new ArrayList<>();
+
+        // 단계 0: 유니크 제약을 커밋 때 검사하게 한다. 이후의 쓰기부터 적용되므로 첫 쓰기보다 먼저 한다.
+        constraintDeferral.deferWithinCurrentTransaction(rootId);
 
         // 단계 1: 깨끗한 삭제 (깊은 repo부터). 각 repo가 지운 뒤 바로 DB로 보내므로 저장 단계의 INSERT 보다 먼저 나간다.
         for (AutoCacheRepository<?, ?, ?> repository : deepestFirst) {

@@ -109,6 +109,7 @@ protobuf 전송으로 넘어가려면 [§전송 계층 전환](#전송-계층-�
 | `cleanup-interval` | `30` | 좀비 데이터 정리 주기(초) |
 | `broadcast-delay` | `1000` | 구독 후 최초 상태 전송 지연(ms). raw WS 모드에서는 구독 경합이 없어 무시된다 |
 | `sync-wait-attempts` / `sync-wait-interval-ms` | `10` / `500` | 진행 중인 DB flush 를 기다리는 폴링. 입장 경로를 그만큼 붙잡는다 |
+| `defer-unique-constraints` | `true` | 동기화 트랜잭션에서 DEFERRABLE 유니크 제약을 커밋 때 검사([§3](#3-유니크-제약은-deferrable-로)) |
 
 ### 보안 (`sharedsync.auth`)
 
@@ -128,7 +129,8 @@ protobuf 전송으로 넘어가려면 [§전송 계층 전환](#전송-계층-�
 ## 사용 방법 (How to Use)
 
 앱이 작성하는 것은 **엔티티 애노테이션과 인증 전략 두 가지**다. 컨트롤러·DTO·서비스·저장소는
-애노테이션 프로세서가 생성한다.
+애노테이션 프로세서가 생성한다. 캐시 엔티티 테이블에 유니크 제약이 있다면 DB 쪽에 한 가지가 더 필요하다
+([§3](#3-유니크-제약은-deferrable-로)).
 
 ### 1. 엔티티 정의
 
@@ -178,7 +180,32 @@ public class RoomAccessValidator implements SyncAccessValidator {
 2. `Sec-WebSocket-Protocol: sharedsync.v1, bearer.<token>` — 브라우저
 3. `?token=<token>` — 하위 호환. **URL 은 액세스 로그에 남으므로 권장하지 않는다**
 
-### 3. 프레임워크가 제공하는 것
+### 3. 유니크 제약은 DEFERRABLE 로
+
+편집은 캐시에 먼저 쌓이고, 동기화가 그 **최종 상태**를 DB로 옮긴다. 이때 행을 쓰는 순서는 캐시 순회 순서로
+정해진다. PostgreSQL 은 지연 불가(기본값) 유니크 제약을 행 하나 쓸 때마다 검사하므로, 최종 상태가 정상이어도
+옮기는 도중에 같은 키가 두 줄이 되면 동기화가 실패한다. 예를 들면 이런 편집이다.
+
+- 행을 다른 위치로 옮기고, 비운 위치에 새 행을 넣음
+- 여러 행을 한 칸씩 밀기(일정의 날짜 전체를 하루 미루기 등)
+- 두 행의 값을 맞바꾸기 — 어떤 순서로 써도 걸린다
+
+캐시 엔티티 테이블의 유니크 제약을 `DEFERRABLE INITIALLY IMMEDIATE` 로 선언하면, SharedSync 가 **동기화 트랜잭션
+안에서만** 그 제약을 커밋 때 검사하게 바꾼다(`SET CONSTRAINTS … DEFERRED`). 최종 상태가 규칙을 어기면 커밋에서
+실패하고 롤백된다. 동기화 밖의 쓰기(REST 등)는 `INITIALLY IMMEDIATE` 라 지금처럼 문장마다 검사한다.
+
+```sql
+ALTER TABLE slot
+    DROP CONSTRAINT uk_slot_position,
+    ADD CONSTRAINT uk_slot_position UNIQUE (shelf_id, position) DEFERRABLE INITIALLY IMMEDIATE;
+```
+
+- 대상은 동기화할 때마다 카탈로그에서 그 순간 지연 가능한 제약만 고른다. 지연 가능한 제약이 없으면 아무것도 하지 않는다.
+- 기동할 때 캐시 엔티티 테이블에 지연 불가 유니크 제약이 있으면 WARN 을 남긴다.
+- DEFERRABLE 제약은 `INSERT … ON CONFLICT` 의 판정 기준으로 쓸 수 없고, FK 가 참조할 수 없다.
+- PostgreSQL 전용이다. 끄려면 `sharedsync.presence.defer-unique-constraints=false`.
+
+### 4. 프레임워크가 제공하는 것
 
 - `SharedSyncController` — 편집 메시지 디스패치(STOMP `@MessageMapping` + raw WS 양쪽)
 - `<endpoint>/schema.proto` — 클라이언트가 코드 생성에 쓸 wire 스키마와 해시

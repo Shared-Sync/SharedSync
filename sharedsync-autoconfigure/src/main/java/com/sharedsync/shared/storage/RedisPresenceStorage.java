@@ -200,6 +200,30 @@ public class RedisPresenceStorage implements PresenceStorage {
                 redis.opsForValue().setIfAbsent(SYNC_LOCK + rootId, "locked", java.time.Duration.ofSeconds(30)));
     }
 
+    /** 토큰이 같을 때만 지운다. GET 후 DEL 을 따로 하면 그 사이 다른 쪽이 잡은 잠금을 지울 수 있다. */
+    private static final org.springframework.data.redis.core.script.RedisScript<Long> RELEASE_IF_OWNER =
+            new org.springframework.data.redis.core.script.DefaultRedisScript<>(
+                    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+                    Long.class);
+
+    @Override
+    public java.util.Optional<String> tryAcquireSyncLock(String rootId, long ttlMillis) {
+        String token = java.util.UUID.randomUUID().toString();
+        Boolean acquired = redis.opsForValue().setIfAbsent(SYNC_LOCK + rootId, token,
+                java.time.Duration.ofMillis(ttlMillis));
+        return Boolean.TRUE.equals(acquired) ? java.util.Optional.of(token) : java.util.Optional.empty();
+    }
+
+    @Override
+    public void releaseSyncLock(String rootId, String token) {
+        Long removed = redis.execute(RELEASE_IF_OWNER, List.of(SYNC_LOCK + rootId), token);
+        if (removed == null || removed == 0L) {
+            // 이미 만료돼 다른 동기화가 잡았거나 풀렸다. 남의 잠금은 지우지 않는다.
+            log.warn("[RedisStorage] 동기화 잠금이 이미 다른 소유자로 바뀌었거나 만료됨 rootId={}", rootId);
+        }
+        notifySyncComplete(rootId);
+    }
+
     @Override
     public void setIsLoading(String rootId, boolean isLoading) {
         String key = "CACHE:LOADING:" + rootId;

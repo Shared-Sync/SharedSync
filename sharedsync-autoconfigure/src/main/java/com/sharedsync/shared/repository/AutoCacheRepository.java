@@ -290,17 +290,294 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
     }
 
     /**
-     * 추적된 삭제 ID 목록을 반환합니다.
+     * 삭제를 그 엔티티의 루트와 함께 추적한다.
+     *
+     * <p>루트 엔티티 자신의 삭제와 루트를 못 찾은 경우는 예전처럼 전역 Set 에 기록한다. 루트 엔티티의 DB 삭제는
+     * 예전부터 캐시 동기화가 하지 않았고(자식 repo 만 처리), 이 동작은 바꾸지 않는다.</p>
+     */
+    private void trackDeletion(ID id, DTO dto) {
+        if (parentIdFields.isEmpty()) {
+            trackDeletedId(id);
+            return;
+        }
+        Object rootId = null;
+        try {
+            rootId = dto != null ? resolveRootIdOfDto(dto) : resolveRootIdById(id);
+        } catch (Exception e) {
+            log.debug("[AutoCacheRepository] 삭제 추적용 루트 해석 실패 id={}: {}", id, e.getMessage());
+        }
+        deletedSet.track(id, rootId);
+    }
+
+    /**
+     * 추적된 삭제 ID 목록을 반환합니다(예전 전역 Set).
      */
     public Set<String> getDeletedIds() {
         return deletedSet.getDeletedIds();
     }
 
     /**
-     * 추적된 삭제 ID 목록을 초기화합니다.
+     * 추적된 삭제 ID 목록을 초기화합니다(예전 전역 Set).
+     *
+     * @deprecated 커밋 전에 모든 루트의 추적을 지운다. 동기화는 {@link #clearTrackedDeletions(DeletionBatch)} 를 쓴다.
      */
+    @Deprecated
     public void clearDeletedIds() {
         deletedSet.clearDeletedIds();
+    }
+
+    // ==== 루트 해석 ====
+
+    private static final int MAX_HIERARCHY_DEPTH = 16;
+
+    /** 이 DTO가 속한 루트 엔티티의 ID. 부모를 캐시(없으면 DB)에서 따라 올라간다. 못 찾으면 null. */
+    public Object resolveRootIdOfDto(DTO dto) {
+        return resolveRootIdOfDto(dto, 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    public Object resolveRootIdOfDtoUnchecked(Object dto) {
+        return resolveRootIdOfDto((DTO) dto, 0);
+    }
+
+    private Object resolveRootIdOfDto(DTO dto, int depth) {
+        if (dto == null || depth > MAX_HIERARCHY_DEPTH) {
+            return null;
+        }
+        if (parentIdFields.isEmpty()) {
+            return extractId(dto);
+        }
+        for (Map.Entry<Field, Class<?>> entry : parentEntityClassMap.entrySet()) {
+            Object parentId;
+            try {
+                parentId = entry.getKey().get(dto);
+            } catch (IllegalAccessException e) {
+                continue;
+            }
+            if (parentId == null) {
+                continue;
+            }
+            AutoCacheRepository<?, ?, ?> parentRepo = repositoryForEntity(entry.getValue());
+            if (parentRepo != null) {
+                return parentRepo.resolveRootIdById(parentId, depth + 1);
+            }
+        }
+        return null;
+    }
+
+    /** 이 repo의 엔티티 ID로 루트 ID를 찾는다. 캐시에 없으면 DB에서 읽는다(캐시에는 쓰지 않음). */
+    public Object resolveRootIdById(Object rawId) {
+        return resolveRootIdById(rawId, 0);
+    }
+
+    private Object resolveRootIdById(Object rawId, int depth) {
+        ID id = changeType(rawId);
+        if (id == null) {
+            return null;
+        }
+        DTO dto = findDtoById(id);
+        if (dto == null) {
+            T entity = loadEntityByIdCriteria(id);
+            dto = entity == null ? null : convertToDto(entity);
+        }
+        return resolveRootIdOfDto(dto, depth);
+    }
+
+    private AutoCacheRepository<?, ?, ?> repositoryForEntity(Class<?> entityClass) {
+        for (AutoCacheRepository<?, ?, ?> repository : allRepositories()) {
+            if (repository.getEntityClass().equals(entityClass)) {
+                return repository;
+            }
+        }
+        for (AutoCacheRepository<?, ?, ?> repository : allRepositories()) {
+            if (entityClass.isAssignableFrom(repository.getEntityClass())) {
+                return repository;
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private java.util.Collection<AutoCacheRepository<?, ?, ?>> allRepositories() {
+        return ((Map<String, AutoCacheRepository<?, ?, ?>>) (Map<?, ?>) applicationContext
+                .getBeansOfType(AutoCacheRepository.class)).values();
+    }
+
+    /** 루트에서의 깊이(루트 = 0). 동기화가 삭제를 잎부터 처리하는 순서를 정할 때 쓴다. */
+    public int hierarchyDepth() {
+        return hierarchyDepth(0);
+    }
+
+    private int hierarchyDepth(int guard) {
+        if (parentIdFields.isEmpty() || guard > MAX_HIERARCHY_DEPTH) {
+            return 0;
+        }
+        int depth = 1;
+        for (Class<?> parentClass : parentEntityClassMap.values()) {
+            AutoCacheRepository<?, ?, ?> parentRepo = repositoryForEntity(parentClass);
+            if (parentRepo != null && parentRepo != this) {
+                depth = Math.max(depth, 1 + parentRepo.hierarchyDepth(guard + 1));
+            }
+        }
+        return depth;
+    }
+
+    // ==== 루트별 삭제 반영 (동기화 트랜잭션 안에서 호출) ====
+
+    /** 한 번의 동기화가 이 repo에서 처리한 삭제 추적. 커밋이 성공한 뒤에만 정리한다. */
+    public record DeletionBatch(List<String> byRootIds, List<String> legacyIds) {
+        public static final DeletionBatch EMPTY = new DeletionBatch(List.of(), List.of());
+    }
+
+    /**
+     * 이 루트 소속으로 추적된 삭제를 DB에 반영한다. 추적 정리는 하지 않는다 — 호출자가 커밋 후에
+     * {@link #clearTrackedDeletions(DeletionBatch)} 로 정리해야 한다(롤백되면 남겨서 다음 동기화가 다시 시도).
+     *
+     * <p>순서: 보류 중인 쓰기를 먼저 플러시하고, 지울 엔티티마다 NOT NULL FK로 참조하는 남은 DB 자식을
+     * 벌크 삭제한 뒤 엔티티를 지운다. 자식 repo부터(깊은 것부터) 호출되어야 한다. 루트 repo 자신은 예전처럼
+     * 처리하지 않는다.</p>
+     */
+    @SuppressWarnings("unchecked")
+    public DeletionBatch deleteTrackedForRoot(Object rootId) {
+        if (parentIdFields.isEmpty() || rootId == null) {
+            return DeletionBatch.EMPTY;
+        }
+        String root = rootId.toString();
+        List<String> byRoot = deletedSet.pendingFor(root);
+        List<String> legacyHandled = new ArrayList<>();
+        List<String> targets = new ArrayList<>(byRoot);
+
+        // 예전 전역 Set: DB 기준으로 루트를 해석해 이 루트 것만 처리한다. DB에 없는 것은 지울 게 없으니 정리만.
+        Set<String> legacy = deletedSet.getDeletedIds();
+        if (legacy != null) {
+            for (String idStr : legacy) {
+                ID id = convertStringToId(idStr);
+                if (id == null) {
+                    continue;
+                }
+                T entity = entityManager.find(getEntityClass(), id);
+                if (entity == null) {
+                    legacyHandled.add(idStr);
+                    continue;
+                }
+                Object owner = resolveRootIdOfDto(convertToDto(entity));
+                if (owner != null && root.equals(owner.toString())) {
+                    targets.add(idStr);
+                    legacyHandled.add(idStr);
+                }
+            }
+        }
+
+        if (targets.isEmpty()) {
+            return new DeletionBatch(byRoot, legacyHandled);
+        }
+
+        log.info("[CacheRepository] Processing tracked deletions: entity={}, rootId={}, ids={}",
+                cacheKeyPrefix, root, targets);
+
+        // 벌크 삭제는 영속성 컨텍스트를 거치지 않으므로, 보류 중인 쓰기(저장 단계·더 깊은 repo의 삭제)를 먼저 보낸다.
+        entityManager.flush();
+
+        int deleted = 0;
+        for (String idStr : new java.util.LinkedHashSet<>(targets)) {
+            ID id = convertStringToId(idStr);
+            if (id == null) {
+                continue;
+            }
+            T entity = entityManager.find(getEntityClass(), id);
+            if (entity == null) {
+                continue; // 이미 지워짐 — 재처리해도 결과가 같다(멱등)
+            }
+            bulkDeleteNotNullDescendants(getEntityClass(), id);
+            entityManager.remove(entity);
+            deleted++;
+        }
+        if (deleted > 0) {
+            log.info("[CacheRepository] Deleted {} entities from DB by tracked deletions for entity={}",
+                    deleted, cacheKeyPrefix);
+        }
+        return new DeletionBatch(byRoot, legacyHandled);
+    }
+
+    @SuppressWarnings("unchecked")
+    public DeletionBatch deleteTrackedForRootUnchecked(Object rootId) {
+        return deleteTrackedForRoot(rootId);
+    }
+
+    /** 커밋 후 호출: 이번 동기화가 처리한 추적만 지운다. */
+    public void clearTrackedDeletions(DeletionBatch batch) {
+        if (batch == null) {
+            return;
+        }
+        deletedSet.clear(batch.byRootIds(), batch.legacyIds());
+    }
+
+    /**
+     * 부모가 지워지면 남을 수 없는 자식(NOT NULL FK로 부모를 참조)의 남은 DB 행을, 손자부터 벌크 삭제한다.
+     *
+     * <p>캐시에 있던 자식은 이미 추적되어 앞 단계에서 지워졌다. 여기서 지우는 건 캐시에 없던 DB 행뿐이다.
+     * 지금은 이런 행이 있으면 부모 삭제가 FK 위반으로 실패하므로, 실패하던 경우에만 결과가 달라진다.
+     * NULL 허용 FK 자식은 건드리지 않는다 — 앱의 DB 설정(ON DELETE SET NULL 등)에 맡긴다.</p>
+     */
+    private void bulkDeleteNotNullDescendants(Class<?> parentClass, Object parentId) {
+        bulkDeleteNotNullDescendants(parentClass, " = :pid", parentId, 0);
+    }
+
+    private void bulkDeleteNotNullDescendants(Class<?> parentClass, String parentIdCondition, Object parentId,
+            int depth) {
+        if (depth > MAX_HIERARCHY_DEPTH) {
+            return;
+        }
+        Field parentIdField = CacheEntityMetadata.locateEntityIdField(parentClass);
+        if (parentIdField == null) {
+            return;
+        }
+        for (AutoCacheRepository<?, ?, ?> childRepo : allRepositories()) {
+            if (!childRepo.isParentEntityOf(parentClass)) {
+                continue;
+            }
+            Class<?> childClass = childRepo.getEntityClass();
+            Field fkField = notNullReferenceTo(childClass, parentClass);
+            if (fkField == null) {
+                continue;
+            }
+            Field childIdField = CacheEntityMetadata.locateEntityIdField(childClass);
+            if (childIdField == null) {
+                continue;
+            }
+            String childName = entityManager.getMetamodel().entity(childClass).getName();
+            String alias = "c" + depth;
+            String condition = alias + "." + fkField.getName() + "." + parentIdField.getName() + parentIdCondition;
+
+            // 손자 먼저: 이 자식들을 NOT NULL 로 참조하는 행부터 지운다.
+            String childIdsSubquery = " in (select " + alias + "." + childIdField.getName() + " from " + childName
+                    + " " + alias + " where " + condition + ")";
+            bulkDeleteNotNullDescendants(childClass, childIdsSubquery, parentId, depth + 1);
+
+            int removed = entityManager.createQuery("delete from " + childName + " " + alias + " where " + condition)
+                    .setParameter("pid", parentId)
+                    .executeUpdate();
+            if (removed > 0) {
+                log.info("[CacheRepository] Bulk-deleted {} untracked {} rows under {} id={}",
+                        removed, childClass.getSimpleName(), parentClass.getSimpleName(), parentId);
+            }
+        }
+    }
+
+    /** childClass 가 parentClass 를 NOT NULL FK(@ManyToOne optional=false 또는 @JoinColumn nullable=false)로 참조하는 필드. */
+    private static Field notNullReferenceTo(Class<?> childClass, Class<?> parentClass) {
+        for (Field field : ReflectionSupport.getAllFieldsInHierarchy(childClass)) {
+            jakarta.persistence.ManyToOne manyToOne = field.getAnnotation(jakarta.persistence.ManyToOne.class);
+            if (manyToOne == null || !field.getType().isAssignableFrom(parentClass)) {
+                continue;
+            }
+            jakarta.persistence.JoinColumn joinColumn = field.getAnnotation(jakarta.persistence.JoinColumn.class);
+            boolean notNull = !manyToOne.optional() || (joinColumn != null && !joinColumn.nullable());
+            if (notNull) {
+                return field;
+            }
+        }
+        return null;
     }
 
     /**
@@ -1093,12 +1370,15 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
             return;
         }
 
-        // 삭제 추적: 영속 ID를 DELETED Set에 기록 (동기화 시 DB에서 삭제할 대상)
-        trackDeletedId(id);
-
         String hashKey = getRedisKey(id);
-        // 부모 인덱스에서 제거를 위해 DTO 조회
+        // 부모 인덱스에서 제거하고, 삭제 추적에 쓸 루트를 찾기 위해 DTO 조회
         DTO dto = getCacheStore().hashGet(hashKey, String.valueOf(id));
+
+        // 삭제 추적: 영속 ID를 루트와 함께 기록 (동기화 시 DB에서 삭제할 대상).
+        // 자식 전파(propagateParentDeletion)보다 먼저 해야 한다 — 부모 DTO가 아직 캐시에 있어야
+        // 자식의 루트도 찾을 수 있다.
+        trackDeletion(id, dto);
+
         if (dto != null) {
             for (Map.Entry<Field, Class<?>> entry : parentEntityClassMap.entrySet()) {
                 try {
@@ -1481,7 +1761,11 @@ public abstract class AutoCacheRepository<T, ID, DTO extends CacheDto<ID>> imple
      * 비교 기반 삭제(deleteEntitiesNotInCache)보다 안정적입니다.
      * - 명시적으로 삭제된 항목만 DB에서 제거
      * - 캐시 손실/레이스 컨디션에 의한 오삭제 방지
+     *
+     * @deprecated 모든 루트의 추적을 처리하고 커밋 전에 비워서, 실패하는 루트가 다른 루트의 삭제를 없앴다.
+     *             동기화는 {@link #deleteTrackedForRoot(Object)} + 커밋 후 {@link #clearTrackedDeletions(DeletionBatch)} 를 쓴다.
      */
+    @Deprecated
     @SuppressWarnings("unchecked")
     public void deleteEntitiesByDeletedSet() {
         Set<String> deletedIdStrings = getDeletedIds();

@@ -145,8 +145,12 @@ public class SharedSyncCoreConfig {
             CacheSyncService cacheSyncService,
             PresenceStorage presenceStorage,
             SharedSyncPresenceProperties presenceProperties,
-            IdPoolService idPoolService) {
-        return new PeriodicSyncScheduler(cacheSyncService, presenceStorage, presenceProperties, idPoolService);
+            IdPoolService idPoolService,
+            ObjectProvider<com.sharedsync.shared.metrics.SyncMetrics> metrics) {
+        PeriodicSyncScheduler scheduler = new PeriodicSyncScheduler(cacheSyncService, presenceStorage,
+                presenceProperties, idPoolService);
+        scheduler.setMetrics(metrics.getIfAvailable(() -> com.sharedsync.shared.metrics.SyncMetrics.NOOP));
+        return scheduler;
     }
 
     @Bean

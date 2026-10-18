@@ -26,4 +26,11 @@ public interface SyncMetrics {
     /** 클라이언트에 돌려준 에러 프레임. code 별로 센다. */
     default void error(String code) {
     }
+
+    /**
+     * 캐시→DB 동기화 실패. kind 는 periodic/disconnect. 같은 방이 계속 실패하면 그 방의 변경은 DB에 쌓이지
+     * 못하고 캐시에만 남는다 — 이 값이 계속 늘면 실패 원인(로그)을 봐야 한다.
+     */
+    default void syncFailure(String kind) {
+    }
 }

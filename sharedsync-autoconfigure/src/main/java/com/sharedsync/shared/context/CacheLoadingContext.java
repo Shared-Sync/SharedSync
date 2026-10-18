@@ -13,15 +13,34 @@ public final class CacheLoadingContext {
 
     private static final ThreadLocal<String> LOADING_ROOT = new ThreadLocal<>();
 
+    /**
+     * 적재 중 조회가 예외를 삼켰는지. DB 조회 협력자는 예외가 나면 빈 목록이나 null 을 돌려줘서, 적재가 "성공"으로
+     * 끝나도 일부가 빠진 캐시일 수 있다. 그런 캐시에는 "온전히 채워진 상태" 표시를 붙이면 안 된다.
+     */
+    private static final ThreadLocal<Boolean> LOAD_FAILED = new ThreadLocal<>();
+
     private CacheLoadingContext() {
     }
 
     public static void begin(String rootId) {
         LOADING_ROOT.set(rootId);
+        LOAD_FAILED.remove();
     }
 
     public static void end() {
         LOADING_ROOT.remove();
+        LOAD_FAILED.remove();
+    }
+
+    /** 적재 중인 스레드에서만 표시한다. 적재 밖의 조회 실패는 표시 대상이 아니다. */
+    public static void markFailed() {
+        if (LOADING_ROOT.get() != null) {
+            LOAD_FAILED.set(Boolean.TRUE);
+        }
+    }
+
+    public static boolean hasFailed() {
+        return Boolean.TRUE.equals(LOAD_FAILED.get());
     }
 
     /**

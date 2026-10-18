@@ -30,6 +30,8 @@ public class SyncFrameExecutor {
     private final ExecutorService pool;
     private final int queueLimit;
     private final Map<String, SessionQueue> queues = new ConcurrentHashMap<>();
+    /** 아직 끝나지 않은 작업 수(대기 + 실행 중). 종료 때 처리 중이던 편집이 끝나길 기다리는 데 쓴다. */
+    private final AtomicInteger inFlight = new AtomicInteger();
 
     public SyncFrameExecutor(int threads, int queueLimit) {
         this.queueLimit = queueLimit;
@@ -51,7 +53,10 @@ public class SyncFrameExecutor {
      */
     public boolean submit(String sessionId, Runnable task) {
         SessionQueue queue = queues.computeIfAbsent(sessionId, id -> new SessionQueue());
+        // 넣기 전에 센다. 넣은 직후 다른 스레드가 꺼내 실행하고 줄이면 잠깐 음수가 된다.
+        inFlight.incrementAndGet();
         if (!queue.offer(task)) {
+            inFlight.decrementAndGet();
             log.warn("[SharedSync] 세션 큐 초과로 프레임 거절 sessionId={} limit={}", sessionId, queueLimit);
             return false;
         }
@@ -67,9 +72,16 @@ public class SyncFrameExecutor {
         SessionQueue queue = queues.remove(sessionId);
         int discarded = queue == null ? 0 : queue.discardPending();
         if (discarded > 0) {
+            inFlight.addAndGet(-discarded);
             log.debug("[SharedSync] 종료된 세션의 대기 프레임 {}건 폐기 sessionId={}", discarded, sessionId);
         }
-        pool.execute(guard(finalTask, sessionId));
+        inFlight.incrementAndGet();
+        try {
+            pool.execute(counted(guard(finalTask, sessionId)));
+        } catch (RuntimeException e) {
+            inFlight.decrementAndGet();
+            throw e;
+        }
     }
 
     private void drainIfIdle(String sessionId, SessionQueue queue) {
@@ -90,8 +102,39 @@ public class SyncFrameExecutor {
                 }
                 continue;
             }
-            guard(task, sessionId).run();
+            counted(guard(task, sessionId)).run();
         }
+    }
+
+    private Runnable counted(Runnable task) {
+        return () -> {
+            try {
+                task.run();
+            } finally {
+                inFlight.decrementAndGet();
+            }
+        };
+    }
+
+    /**
+     * 대기 중이거나 실행 중인 작업이 모두 끝날 때까지 최대 timeoutMillis 기다린다. 다 끝났으면 true.
+     * 정상 종료 때, 커넥터가 멈추기 전에 받아 둔 편집이 캐시에 들어간 뒤 마지막 동기화를 하기 위해 쓴다.
+     */
+    public boolean awaitQuiescence(long timeoutMillis) {
+        long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMillis);
+        while (inFlight.get() > 0) {
+            if (System.currentTimeMillis() >= deadline) {
+                log.warn("[SharedSync] 처리 중인 프레임 {}건이 끝나기 전에 대기 시간이 끝났다", inFlight.get());
+                return false;
+            }
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
     }
 
     private Runnable guard(Runnable task, String sessionId) {

@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
+import com.sharedsync.shared.context.CacheLoadingContext;
 import com.sharedsync.shared.dto.CacheDto;
 
 import jakarta.persistence.EntityManager;
@@ -53,6 +54,7 @@ public final class DatabaseReader<T, ID, DTO extends CacheDto<ID>> {
             try {
                 return loadEntitiesByCriteria(parentId, parentClass);
             } catch (Exception e) {
+                CacheLoadingContext.markFailed();
                 e.printStackTrace();
             }
         } else {
@@ -60,6 +62,7 @@ public final class DatabaseReader<T, ID, DTO extends CacheDto<ID>> {
             try {
                 return loadAllEntitiesByCriteria();
             } catch (Exception e) {
+                CacheLoadingContext.markFailed();
                 System.err.println("[SharedSync] Criteria API findAll 실패: " + e.getMessage());
             }
         }
@@ -229,6 +232,7 @@ public final class DatabaseReader<T, ID, DTO extends CacheDto<ID>> {
             try {
                 return em.find(entityClass, id);
             } catch (Exception ex) {
+                CacheLoadingContext.markFailed();
                 return null;
             }
         }

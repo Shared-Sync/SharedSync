@@ -187,4 +187,63 @@ public class SharedSyncPresenceProperties {
     public void setSyncFailureAlertThreshold(int syncFailureAlertThreshold) {
         this.syncFailureAlertThreshold = syncFailureAlertThreshold;
     }
+
+    /**
+     * 연속 실패 횟수(SYNC_FAIL_COUNT)의 유지 시간(초). 이 시간 동안 새 실패가 없으면 횟수가 사라진다.
+     * 연속 실패가 {@link #syncFailureAlertThreshold} 이상인 방은 "막힌 방"으로 보고, 재입장 때 남은 캐시를 쓰지 않고
+     * 예전처럼 DB에서 다시 채운다(주인 없는 캐시 처리도 건너뛴다).
+     */
+    private long syncFailureCountTtlSeconds = 60 * 60;
+
+    /** 정상 종료 때 세션 정리와 마지막 동기화에 쓰는 전체 시간 상한(ms). Spring 의 단계별 종료 상한(30초)보다 작아야 한다. */
+    private long shutdownFlushTimeoutMs = 10_000;
+
+    /** 접속자도 예약된 퇴장 동기화도 없이 남은 캐시를 주기 동기화가 저장할지. */
+    private boolean orphanSyncEnabled = true;
+
+    /** 주인 없는 캐시로 처음 보인 뒤 이 시간(초)이 지나야 저장한다. 퇴장 지연과 재시도 전체보다 충분히 길어야 한다. */
+    private long orphanGraceSeconds = 120;
+
+    /** 퇴장 동기화 예약 표시(PRESENCE:PENDING_SYNC)의 유지 시간(ms). 퇴장 지연 + 잠금 재시도 전체보다 길어야 한다. */
+    private long pendingSyncMarkerTtlMs = 60_000;
+
+    public long getSyncFailureCountTtlSeconds() {
+        return syncFailureCountTtlSeconds;
+    }
+
+    public void setSyncFailureCountTtlSeconds(long syncFailureCountTtlSeconds) {
+        this.syncFailureCountTtlSeconds = syncFailureCountTtlSeconds;
+    }
+
+    public long getShutdownFlushTimeoutMs() {
+        return shutdownFlushTimeoutMs;
+    }
+
+    public void setShutdownFlushTimeoutMs(long shutdownFlushTimeoutMs) {
+        this.shutdownFlushTimeoutMs = shutdownFlushTimeoutMs;
+    }
+
+    public boolean isOrphanSyncEnabled() {
+        return orphanSyncEnabled;
+    }
+
+    public void setOrphanSyncEnabled(boolean orphanSyncEnabled) {
+        this.orphanSyncEnabled = orphanSyncEnabled;
+    }
+
+    public long getOrphanGraceSeconds() {
+        return orphanGraceSeconds;
+    }
+
+    public void setOrphanGraceSeconds(long orphanGraceSeconds) {
+        this.orphanGraceSeconds = orphanGraceSeconds;
+    }
+
+    public long getPendingSyncMarkerTtlMs() {
+        return pendingSyncMarkerTtlMs;
+    }
+
+    public void setPendingSyncMarkerTtlMs(long pendingSyncMarkerTtlMs) {
+        this.pendingSyncMarkerTtlMs = pendingSyncMarkerTtlMs;
+    }
 }

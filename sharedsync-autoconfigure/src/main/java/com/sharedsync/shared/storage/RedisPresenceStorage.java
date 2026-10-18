@@ -301,4 +301,82 @@ public class RedisPresenceStorage implements PresenceStorage {
         notifySyncComplete(rootId);
     }
 
+    // ===== 캐시 상태 표시 =====
+
+    private static final String CACHE_READY = "CACHE:READY:";
+    private static final String PENDING_SYNC = "PRESENCE:PENDING_SYNC:";
+    private static final String SYNC_FAIL_COUNT = "SYNC_FAIL_COUNT:";
+
+    /** 트래커 키가 없을 때만 표시를 지운다. 빈 해시는 Redis 가 키째 지우므로 EXISTS 로 충분하다. */
+    private static final org.springframework.data.redis.core.script.RedisScript<Long> CLEAR_READY_IF_NO_TRACKER =
+            new org.springframework.data.redis.core.script.DefaultRedisScript<>(
+                    "if redis.call('exists', KEYS[1]) == 0 then redis.call('del', KEYS[2]) return 1 else return 0 end",
+                    Long.class);
+
+    @Override
+    public void markCacheReady(String rootId) {
+        redis.opsForValue().set(CACHE_READY + rootId, "1");
+    }
+
+    @Override
+    public boolean isCacheReady(String rootId) {
+        return Boolean.TRUE.equals(redis.hasKey(CACHE_READY + rootId));
+    }
+
+    @Override
+    public void clearCacheReady(String rootId) {
+        redis.delete(CACHE_READY + rootId);
+    }
+
+    @Override
+    public boolean clearCacheReadyIfNoTracker(String rootId) {
+        Long cleared = redis.execute(CLEAR_READY_IF_NO_TRACKER, List.of(TRACKER + rootId, CACHE_READY + rootId));
+        return cleared != null && cleared == 1L;
+    }
+
+    @Override
+    public void markPendingSync(String rootId, long ttlMillis) {
+        redis.opsForValue().set(PENDING_SYNC + rootId, "1", java.time.Duration.ofMillis(ttlMillis));
+    }
+
+    @Override
+    public boolean hasPendingSync(String rootId) {
+        return Boolean.TRUE.equals(redis.hasKey(PENDING_SYNC + rootId));
+    }
+
+    @Override
+    public void clearPendingSync(String rootId) {
+        redis.delete(PENDING_SYNC + rootId);
+    }
+
+    @Override
+    public int incrementSyncFailure(String rootId, long ttlMillis) {
+        String key = SYNC_FAIL_COUNT + rootId;
+        Long count = redis.opsForValue().increment(key);
+        redis.expire(key, java.time.Duration.ofMillis(ttlMillis));
+        return count == null ? 0 : count.intValue();
+    }
+
+    @Override
+    public int getSyncFailureCount(String rootId) {
+        // INCR 로 쓴 값이라 JSON 직렬화기가 숫자로 읽는다.
+        Object value = redis.opsForValue().get(SYNC_FAIL_COUNT + rootId);
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value != null) {
+            try {
+                return Integer.parseInt(value.toString().trim());
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    @Override
+    public void clearSyncFailure(String rootId) {
+        redis.delete(SYNC_FAIL_COUNT + rootId);
+    }
+
 }

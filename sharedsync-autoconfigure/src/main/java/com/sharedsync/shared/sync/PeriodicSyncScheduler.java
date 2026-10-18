@@ -87,8 +87,8 @@ public class PeriodicSyncScheduler {
             }
 
             Set<String> allRoomIds = presenceStorage.getAllRoomIds();
-            if (allRoomIds == null || allRoomIds.isEmpty()) {
-                return;
+            if (allRoomIds == null) {
+                allRoomIds = Set.of();
             }
 
             // 활성 사용자가 있는 Room만 필터
@@ -115,25 +115,26 @@ public class PeriodicSyncScheduler {
                 long started = System.currentTimeMillis();
                 try {
                     log.debug("[PeriodicSync] Syncing rootId={}", rootId);
+                    // 성공하면 커밋 후 정리가 연속 실패 횟수를 지운다.
                     cacheSyncService.syncToDatabase(rootId, true); // keepCache=true
-                    consecutiveFailures.remove(rootId);
                 } catch (Exception e) {
                     log.error("[PeriodicSync] Failed to sync rootId={}: {}", rootId, e.getMessage());
-                    recordFailure(rootId);
+                    recordFailure(rootId, e, "periodic");
                 } finally {
                     presenceStorage.releaseSyncLock(rootId, token.get());
                     warnIfSlow(rootId, started);
                 }
             }
-            // 사용자가 모두 떠난 방의 실패 기록은 남겨둘 이유가 없다.
-            consecutiveFailures.keySet().retainAll(allRoomIds);
         } catch (Exception e) {
             log.error("[PeriodicSync] Unexpected error during periodic sync: {}", e.getMessage());
         }
-    }
 
-    /** 방별 연속 실패 횟수(이 인스턴스 기준). 관측용이며 동작은 바꾸지 않는다. */
-    private final java.util.Map<String, Integer> consecutiveFailures = new java.util.concurrent.ConcurrentHashMap<>();
+        try {
+            syncOrphanCaches();
+        } catch (Exception e) {
+            log.error("[PeriodicSync] Unexpected error during orphan cache sync: {}", e.getMessage());
+        }
+    }
 
     private SyncMetrics metrics = SyncMetrics.NOOP;
 
@@ -141,15 +142,127 @@ public class PeriodicSyncScheduler {
         this.metrics = metrics == null ? SyncMetrics.NOOP : metrics;
     }
 
-    private void recordFailure(String rootId) {
-        metrics.syncFailure("periodic");
-        int count = consecutiveFailures.merge(rootId, 1, Integer::sum);
+    /**
+     * 연속 실패 횟수를 저장소에 센다(파드끼리 공유 — 다른 파드의 재입장이 "막힌 방"인지 판단할 때 본다).
+     * DB에 닿지 못한 실패는 그 방이 막힌 게 아니므로 세지 않는다. 알림·메트릭은 그대로 남긴다.
+     */
+    private void recordFailure(String rootId, Exception error, String source) {
+        metrics.syncFailure(source);
+        if (SyncFailureClassifier.isConnectionFailure(error)) {
+            return;
+        }
+        int count;
+        try {
+            count = presenceStorage.incrementSyncFailure(rootId,
+                    TimeUnit.SECONDS.toMillis(presenceProperties.getSyncFailureCountTtlSeconds()));
+        } catch (Exception e) {
+            log.warn("[PeriodicSync] 연속 실패 횟수 기록 실패 rootId={}: {}", rootId, e.getMessage());
+            return;
+        }
         int threshold = presenceProperties.getSyncFailureAlertThreshold();
         if (threshold > 0 && count >= threshold) {
             // 이 방의 변경은 계속 DB에 들어가지 못하고 캐시에만 쌓이는 중이다. 삭제 추적은 이 방 안에 머물러
             // 다른 방으로 번지지 않지만, 원인(위의 실패 로그)을 풀어야 이 방이 저장된다.
             log.error("[PeriodicSync] rootId={} 동기화가 {}회 연속 실패했다. 이 방의 변경이 DB에 반영되지 않고 있다.",
                     rootId, count);
+        }
+    }
+
+    private boolean isBlocked(String rootId) {
+        int threshold = presenceProperties.getSyncFailureAlertThreshold();
+        return threshold > 0 && presenceStorage.getSyncFailureCount(rootId) >= threshold;
+    }
+
+    // ==== 주인 없는 캐시 ====
+
+    /** 한 주기에 처리하는 주인 없는 캐시 수 상한. */
+    private static final int ORPHAN_MAX_PER_RUN = 20;
+
+    /** 주인 없는 캐시 후보로 처음 본 시각(이 인스턴스 기준). 유예 시간을 재는 데 쓴다. */
+    private final java.util.Map<String, Long> orphanFirstSeen = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 접속자도, 예약된 퇴장 동기화도, 진행 중인 동기화도 없이 남은 캐시를 저장한다.
+     *
+     * <p>이런 캐시는 마지막 동기화가 재시도 끝에 포기했거나 실패했을 때 남는다. 예전에는 다음 입장 때 DB 값으로
+     * 덮여 편집이 사라졌고, 아무도 안 들어오면 영영 DB에 들어가지 않았다. 적재를 끝까지 성공했다는 표시가 있는
+     * 캐시만 대상으로 하므로, 이 기능을 배포하기 전부터 남아 있던 캐시는 건드리지 않는다. 정상 경로에서는 퇴장
+     * 동기화가 캐시와 표시를 지우므로 대상이 생기지 않는다.</p>
+     *
+     * <p>막힌 방(연속 실패가 알림 기준 이상)은 건너뛴다. 같은 실패만 반복하므로, 재입장 때 예전처럼 DB에서 다시
+     * 채우게 둔다. 루트가 DB에서 사라진 캐시(예: 소프트 삭제된 플랜)는 저장하지 않고 지운다.</p>
+     */
+    private void syncOrphanCaches() {
+        if (!presenceProperties.isOrphanSyncEnabled()) {
+            return;
+        }
+        java.util.List<String> rootIds = cacheSyncService.cachedRootIds();
+        if (rootIds == null || rootIds.isEmpty()) {
+            orphanFirstSeen.clear();
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long graceMillis = TimeUnit.SECONDS.toMillis(Math.max(0L, presenceProperties.getOrphanGraceSeconds()));
+        java.util.Set<String> candidates = new java.util.HashSet<>();
+        int processed = 0;
+        for (String rootId : rootIds) {
+            if (!isOrphanCandidate(rootId)) {
+                continue;
+            }
+            candidates.add(rootId);
+            long firstSeen = orphanFirstSeen.computeIfAbsent(rootId, k -> now);
+            if (now - firstSeen < graceMillis || processed >= ORPHAN_MAX_PER_RUN) {
+                continue;
+            }
+            processed++;
+            handleOrphan(rootId);
+        }
+        orphanFirstSeen.keySet().retainAll(candidates);
+    }
+
+    private boolean isOrphanCandidate(String rootId) {
+        try {
+            return presenceStorage.isCacheReady(rootId)
+                    && !presenceStorage.hasTracker(rootId)
+                    && !presenceStorage.hasPendingSync(rootId)
+                    && !presenceStorage.isSyncing(rootId)
+                    && !presenceStorage.isLoading(rootId)
+                    && !isBlocked(rootId);
+        } catch (Exception e) {
+            log.warn("[PeriodicSync] 주인 없는 캐시 확인 실패 rootId={}: {}", rootId, e.getMessage());
+            return false;
+        }
+    }
+
+    private void handleOrphan(String rootId) {
+        java.util.Optional<String> token = presenceStorage.tryAcquireSyncLock(rootId,
+                presenceProperties.getSyncLockTtlMs());
+        if (token.isEmpty()) {
+            return;
+        }
+        long started = System.currentTimeMillis();
+        try {
+            // 잠금을 잡은 뒤 다시 본다. 그 사이 누가 들어왔거나 퇴장 동기화가 예약됐을 수 있다.
+            if (presenceStorage.hasTracker(rootId) || presenceStorage.hasPendingSync(rootId)
+                    || !presenceStorage.isCacheReady(rootId)) {
+                return;
+            }
+            // 조회가 실패하면 예외 → 아무것도 지우지 않고 다음 주기로 넘긴다.
+            if (!cacheSyncService.rootExistsInDatabase(rootId)) {
+                log.info("[PeriodicSync] rootId={} 의 루트가 DB에 없어(삭제됨) 남은 캐시를 저장하지 않고 지운다.", rootId);
+                cacheSyncService.evictRootWithoutSync(rootId);
+                orphanFirstSeen.remove(rootId);
+                return;
+            }
+            log.info("[PeriodicSync] 주인 없이 남은 캐시를 저장한다 rootId={}", rootId);
+            cacheSyncService.syncToDatabase(rootId, false);
+            orphanFirstSeen.remove(rootId);
+        } catch (Exception e) {
+            log.error("[PeriodicSync] 주인 없는 캐시 저장 실패 rootId={}: {}", rootId, e.getMessage());
+            recordFailure(rootId, e, "orphan");
+        } finally {
+            presenceStorage.releaseSyncLock(rootId, token.get());
+            warnIfSlow(rootId, started);
         }
     }
 

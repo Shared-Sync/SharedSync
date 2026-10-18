@@ -39,7 +39,13 @@ public class CacheInitializer {
     }
 
     /**
-     * 루트 엔티티 ID만 넣으면 전체 계층 캐시 자동 로딩
+     * 루트 엔티티 ID만 넣으면 전체 계층 캐시 자동 로딩.
+     *
+     * <p>끝까지 성공하면 "온전히 채워진 상태" 표시({@link PresenceStorage#markCacheReady})를 남긴다. 재입장 때
+     * 이 표시와 루트 캐시가 있으면 DB에서 다시 채우지 않는다({@code PresenceSessionManager}). 그래도 되는 전제는
+     * <b>남아 있는 캐시가 항상 DB와 같거나 더 새롭다</b>는 것이다: DB에 쓰는 경로는 캐시→DB 동기화와, 캐시도 함께
+     * 고치는 경로뿐이어야 한다. 캐시를 거치지 않고 일정 데이터를 DB에 쓰는 경로가 생기면 이 전제가 깨진다.
+     * (예외: 루트가 DB에서 사라지는 경우 — 주인 없는 캐시 처리가 그 캐시를 지운다.)</p>
      */
     public void initializeHierarchy(String rootId) {
         AutoCacheRepository<?, ?, ?> rootRepo = findRootRepository();
@@ -55,11 +61,26 @@ public class CacheInitializer {
 
         try {
             loadRecursively(rootRepo, rootId);
+            // DB 조회가 예외를 삼키면 빈 목록·null 이 돌아와 일부가 빠진 채 "성공"한다. 그런 캐시에는 표시를 붙이지 않는다.
+            if (!CacheLoadingContext.hasFailed() && hasCachedRoot(rootRepo, rootId)) {
+                presenceStorage.markCacheReady(rootId);
+            }
         } finally {
             // 로딩 완료 후 해제 (성공하든 실패하든)
             CacheLoadingContext.end();
             presenceStorage.setIsLoading(rootId, false);
         }
+    }
+
+    /** 루트 DTO가 캐시에 있는지. */
+    public boolean hasCachedRoot(String rootId) {
+        AutoCacheRepository<?, ?, ?> rootRepo = findRootRepository();
+        return rootRepo != null && hasCachedRoot(rootRepo, rootId);
+    }
+
+    private static boolean hasCachedRoot(AutoCacheRepository<?, ?, ?> rootRepo, String rootId) {
+        Object id = rootRepo.convertStringToId(rootId);
+        return id != null && rootRepo.findDtoByIdUnchecked(id) != null;
     }
 
     /**

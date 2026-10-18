@@ -121,6 +121,17 @@ public class SharedSyncCoreConfig {
                 webSocketProperties, webSocketSessionRegistry);
     }
 
+    /** 정상 종료 때 Redis·DB가 멈추기 전에 세션 정리와 마지막 동기화를 한다. */
+    @Bean
+    @ConditionalOnMissingBean
+    public com.sharedsync.shared.lifecycle.SharedSyncShutdownLifecycle sharedSyncShutdownLifecycle(
+            PresenceSessionManager presenceSessionManager,
+            ObjectProvider<com.sharedsync.shared.transport.SyncFrameExecutor> frameExecutor,
+            SharedSyncPresenceProperties presenceProperties) {
+        return new com.sharedsync.shared.lifecycle.SharedSyncShutdownLifecycle(presenceSessionManager, frameExecutor,
+                presenceProperties);
+    }
+
     // ==========================================
     // 캐시 / 동기화
     // ==========================================

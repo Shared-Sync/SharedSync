@@ -203,6 +203,11 @@ public class SyncWebSocketHandler extends BinaryWebSocketHandler implements SubP
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String sessionId = session.getId();
         registry.remove(sessionId);
+        if (presenceSessionManager.isHandledAtShutdown(sessionId)) {
+            // 정상 종료 때 종료 정리가 이미 퇴장 처리했다. 웹 서버는 모든 빈이 정리된 맨 마지막에 세션을 닫아서,
+            // 이 시점에는 실행기도 Redis 도 멈춰 있다.
+            return;
+        }
         // 남아 있던 편집 프레임은 버린다 — 결과를 보낼 곳이 이미 없다. 퇴장 처리(프레즌스·히스토리
         // 정리)는 그 뒤에 실행기에서 돈다. Redis 왕복이라 컨테이너 스레드에서 하면 안 된다.
         frameExecutor.terminate(sessionId, () ->

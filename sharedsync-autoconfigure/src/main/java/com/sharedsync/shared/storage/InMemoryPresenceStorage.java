@@ -236,4 +236,77 @@ public class InMemoryPresenceStorage implements PresenceStorage {
             notifySyncComplete(rootId);
         }
     }
+
+    // ===== 캐시 상태 표시 =====
+
+    private final java.util.Set<String> readyFlags = ConcurrentHashMap.newKeySet();
+    /** rootId -> 만료 시각(ms) */
+    private final Map<String, Long> pendingSyncMarkers = new ConcurrentHashMap<>();
+    /** 단일 JVM 이라 실패 횟수에 만료는 두지 않는다. */
+    private final Map<String, Integer> syncFailures = new ConcurrentHashMap<>();
+    private final Object readyLock = new Object();
+
+    @Override
+    public void markCacheReady(String rootId) {
+        readyFlags.add(rootId);
+    }
+
+    @Override
+    public boolean isCacheReady(String rootId) {
+        return readyFlags.contains(rootId);
+    }
+
+    @Override
+    public void clearCacheReady(String rootId) {
+        readyFlags.remove(rootId);
+    }
+
+    @Override
+    public boolean clearCacheReadyIfNoTracker(String rootId) {
+        synchronized (readyLock) {
+            if (hasTracker(rootId)) {
+                return false;
+            }
+            readyFlags.remove(rootId);
+            return true;
+        }
+    }
+
+    @Override
+    public void markPendingSync(String rootId, long ttlMillis) {
+        pendingSyncMarkers.put(rootId, System.currentTimeMillis() + ttlMillis);
+    }
+
+    @Override
+    public boolean hasPendingSync(String rootId) {
+        Long expiresAt = pendingSyncMarkers.get(rootId);
+        if (expiresAt == null) {
+            return false;
+        }
+        if (expiresAt < System.currentTimeMillis()) {
+            pendingSyncMarkers.remove(rootId, expiresAt);
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    public void clearPendingSync(String rootId) {
+        pendingSyncMarkers.remove(rootId);
+    }
+
+    @Override
+    public int incrementSyncFailure(String rootId, long ttlMillis) {
+        return syncFailures.merge(rootId, 1, Integer::sum);
+    }
+
+    @Override
+    public int getSyncFailureCount(String rootId) {
+        return syncFailures.getOrDefault(rootId, 0);
+    }
+
+    @Override
+    public void clearSyncFailure(String rootId) {
+        syncFailures.remove(rootId);
+    }
 }

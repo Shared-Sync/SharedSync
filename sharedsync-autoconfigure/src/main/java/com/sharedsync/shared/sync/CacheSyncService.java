@@ -24,11 +24,15 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>루트 하나의 동기화는 한 트랜잭션이고, 다음 순서로 진행한다.</p>
  * <ol>
+ *   <li><b>깨끗한 삭제</b>: 추적된 삭제 중 캐시에 살아 있는 DB 자식이 없는 행을 <b>깊은 repo부터</b> 먼저 지운다.
+ *       같은 유니크 키로 지우고 다시 추가한 행(예: 같은 날짜를 지우고 새로 추가)의 INSERT 가 기존 행에 걸리지 않게
+ *       하기 위해서다. 이런 행은 저장 단계와 서로 영향이 없어 순서만 앞선다.</li>
  *   <li><b>저장</b>: 루트부터 자식으로 내려가며 캐시 DTO를 DB에 반영한다(예전과 같은 순서).</li>
- *   <li><b>삭제</b>: 이 루트 소속으로 추적된 삭제를 <b>깊은 repo부터</b> 반영한다. 저장이 먼저 반영돼 있어야
- *       다른 부모로 옮긴 자식이 원래 부모와 함께 지워지지 않고, 자식부터 지워야 부모 삭제가 FK에 걸리지 않는다.</li>
- *   <li><b>커밋 후 정리</b>: 이번에 처리한 삭제 추적 정리와(퇴장 동기화면) 캐시 삭제. 커밋이 성공했을 때만
- *       실행된다. 롤백되면 캐시와 추적이 그대로 남아 다음 동기화가 다시 시도한다.</li>
+ *   <li><b>나머지 삭제</b>: 남은 추적 삭제를 <b>깊은 repo부터</b> 반영한다. 자식을 다른 부모로 옮긴 행이 여기 남는다.
+ *       저장이 먼저 반영돼 있어야 옮긴 자식이 원래 부모와 함께 지워지지 않고, 자식부터 지워야 부모 삭제가 FK에
+ *       걸리지 않는다.</li>
+ *   <li><b>커밋 후 정리</b>: 이번에 처리한 삭제 추적 정리, 연속 실패 횟수 초기화, (퇴장 동기화면) 캐시 표시와 캐시
+ *       삭제. 커밋이 성공했을 때만 실행된다. 롤백되면 캐시와 추적이 그대로 남아 다음 동기화가 다시 시도한다.</li>
  * </ol>
  *
  * <p>퇴장 동기화(keepCache=false) 도중 사용자가 돌아오면 트랜잭션을 rollback-only 로 표시하고 멈춘다.
@@ -114,27 +118,77 @@ public class CacheSyncService {
 
         Object rootIdTyped = rootRepository.convertStringToId(rootId);
         SyncRun run = new SyncRun(rootId, keepCache);
+        List<AutoCacheRepository<?, ?, ?>> deepestFirst = childRepositoriesDeepestFirst();
+        List<ProcessedDeletions> processed = new ArrayList<>();
 
-        // 단계 1: 저장
+        // 단계 1: 깨끗한 삭제 (깊은 repo부터). 각 repo가 지운 뒤 바로 DB로 보내므로 저장 단계의 INSERT 보다 먼저 나간다.
+        for (AutoCacheRepository<?, ?, ?> repository : deepestFirst) {
+            processed.add(new ProcessedDeletions(repository, repository.deleteCleanTrackedForRoot(rootIdTyped)));
+        }
+
+        // 단계 2: 저장
         syncRecursively(rootRepository, rootIdTyped, run);
         if (run.aborted || userReturned(run)) {
             abort(run);
             return;
         }
 
-        // 단계 2: 삭제 (깊은 repo부터)
-        List<ProcessedDeletions> processed = new ArrayList<>();
-        for (AutoCacheRepository<?, ?, ?> repository : childRepositoriesDeepestFirst()) {
+        // 단계 3: 나머지 삭제 (깊은 repo부터)
+        for (AutoCacheRepository<?, ?, ?> repository : deepestFirst) {
             processed.add(new ProcessedDeletions(repository, repository.deleteTrackedForRootUnchecked(rootIdTyped)));
         }
 
-        // 단계 3: 커밋 후 정리 예약
+        // 단계 4: 커밋 후 정리 예약
         registerCleanup(run, processed);
 
         // keepCache=true면 캐시 삭제를 건너뜀 (주기적 동기화 시)
         if (keepCache) {
             log.info("[CacheSync] Periodic sync completed for rootId={}, cache retained.", rootId);
         }
+    }
+
+    // ==== 주인 없는 캐시 처리용 ====
+
+    private AutoCacheRepository<?, ?, ?> rootRepository() {
+        return cacheRepositories.stream()
+                .filter(repo -> !repo.isParentIdFieldPresent())
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** 캐시에 남아 있는 루트 ID 목록. */
+    public List<String> cachedRootIds() {
+        AutoCacheRepository<?, ?, ?> root = rootRepository();
+        return root == null ? List.of() : root.cachedIds();
+    }
+
+    /**
+     * 루트 행이 DB에 있는지. 앱의 조회 조건(소프트 삭제 등)이 적용된다. 조회가 실패하면 예외를 던진다.
+     */
+    public boolean rootExistsInDatabase(String rootId) {
+        AutoCacheRepository<?, ?, ?> root = rootRepository();
+        if (root == null) {
+            return true;
+        }
+        return root.existsInDatabase(root.convertStringToId(rootId));
+    }
+
+    /**
+     * 루트가 DB에서 사라진 캐시를 동기화 없이 지운다: 루트부터 자식까지의 캐시, 그 루트의 삭제 추적,
+     * "온전히 채워진 상태" 표시, 연속 실패 횟수. 지울 대상(루트)이 없으니 저장할 것도 없다.
+     */
+    public void evictRootWithoutSync(String rootId) {
+        AutoCacheRepository<?, ?, ?> root = rootRepository();
+        if (root == null) {
+            return;
+        }
+        Object rootIdTyped = root.convertStringToId(rootId);
+        for (AutoCacheRepository<?, ?, ?> repository : childRepositoriesDeepestFirst()) {
+            repository.discardTrackedDeletionsForRoot(rootIdTyped);
+        }
+        root.deleteCacheOnlyByIdUnchecked(rootIdTyped);
+        presenceStorage.clearCacheReady(rootId);
+        presenceStorage.clearSyncFailure(rootId);
     }
 
     private boolean userReturned(SyncRun run) {
@@ -176,12 +230,20 @@ public class CacheSyncService {
                             p.repository().getClass().getSimpleName(), e);
                 }
             }
+            // 커밋됐으면 이 방은 막혀 있지 않다.
+            try {
+                presenceStorage.clearSyncFailure(run.rootId);
+            } catch (Exception e) {
+                log.warn("[CacheSync] 연속 실패 횟수 초기화 실패 rootId={}: {}", run.rootId, e.getMessage());
+            }
             if (run.keepCache) {
                 return;
             }
             // 커밋과 이 시점 사이에 누가 들어왔으면 캐시를 남긴다. 커밋은 끝났으므로 DB와 캐시는 같다.
+            // 트래커 확인과 "온전히 채워진 상태" 표시 삭제를 한 번에 한다. 따로 하면 그 사이 들어온 사용자가
+            // 표시를 보고 다시 채우지 않기로 한 직후에 아래에서 캐시가 지워질 수 있다.
             try {
-                if (presenceStorage.hasTracker(run.rootId)) {
+                if (!presenceStorage.clearCacheReadyIfNoTracker(run.rootId)) {
                     log.info("[CacheSync] User returned after commit. Keeping cache for rootId={}", run.rootId);
                     return;
                 }

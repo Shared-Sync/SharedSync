@@ -50,6 +50,9 @@ public class PresenceSessionManager {
     // 현재 서버 인스턴스에서 관리 중인 세션 목록
     private final java.util.Set<String> localSessions = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    // 종료 정리가 이미 퇴장 처리한 세션
+    private final java.util.Set<String> shutdownHandledSessions = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     // 지연된 동기화 작업 관리용
     private final Map<String, ScheduledFuture<?>> pendingSyncTasks = new java.util.concurrent.ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
@@ -96,6 +99,10 @@ public class PresenceSessionManager {
                 log.info(
                         "[PresenceManager] Skipping initialization for rootId={} because pending sync was intercepted (Cache is fresh).",
                         rootId);
+            } else if (canReuseRemainingCache(rootId)) {
+                // 트래커를 등록한 뒤에 확인해야 한다. 다른 파드의 퇴장 동기화가 커밋 후 정리로 캐시를 지우는 것과
+                // 겹치면, 정리는 트래커를 보고 멈추거나(캐시 유지) 이미 표시를 지웠다(아래 판단이 false → DB에서 채움).
+                log.info("[PresenceManager] First user in room {}. Reusing remaining cache (not yet in DB).", rootId);
             } else {
                 log.info("[PresenceManager] First user in room {}. Initializing hierarchy.", rootId);
                 cacheInitializer.initializeHierarchy(rootId);
@@ -124,6 +131,42 @@ public class PresenceSessionManager {
         } else {
             CompletableFuture.delayedExecutor(delay, TimeUnit.MILLISECONDS).execute(sendInitial);
         }
+    }
+
+    /**
+     * 첫 입장인데 캐시가 남아 있으면 DB로 덮지 않고 그대로 쓴다.
+     *
+     * <p>남은 캐시는 아직 DB에 들어가지 않은 편집을 갖고 있을 수 있다 — 다른 파드로 재접속해 그 파드의 퇴장 동기화
+     * 예약을 취소하지 못한 경우, 마지막 동기화가 실패한 경우. 남은 캐시는 항상 DB와 같거나 더 새로우므로
+     * ({@link CacheInitializer#initializeHierarchy} 참고) 다시 채워서 얻는 건 없고 잃는 것만 있다.</p>
+     *
+     * <p>조건: 적재를 끝까지 성공했다는 표시가 있고, 루트 DTO가 캐시에 있다. 배포 전부터 있던 캐시(표시 없음)와
+     * 일부만 적재된 캐시는 예전처럼 다시 채운다.</p>
+     *
+     * <p>보험: 동기화가 연속으로 실패해 온 방(데이터 때문에 막힌 방)은 예전처럼 DB에서 다시 채운다. 막힘이 풀리는
+     * 대신 막힌 동안의 편집은 사라진다(예전 동작). 다시 채운 행의 삭제 추적은 저장 시 저절로 풀린다.</p>
+     */
+    private boolean canReuseRemainingCache(String rootId) {
+        try {
+            if (!presenceStorage.isCacheReady(rootId) || !cacheInitializer.hasCachedRoot(rootId)) {
+                return false;
+            }
+            if (isBlocked(rootId)) {
+                log.warn("[PresenceManager] rootId={} 동기화가 연속 실패해 온 방이라 남은 캐시를 버리고 DB에서 다시 채운다. "
+                        + "마지막 동기화 이후의 편집은 사라진다.", rootId);
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            log.warn("[PresenceManager] 남은 캐시 확인 실패, DB에서 다시 채운다 rootId={}: {}", rootId, e.getMessage());
+            return false;
+        }
+    }
+
+    /** 연속 실패가 알림 기준 이상인 방. 기준이 0 이하면 막힌 방으로 보지 않는다. */
+    private boolean isBlocked(String rootId) {
+        int threshold = presenceProperties.getSyncFailureAlertThreshold();
+        return threshold > 0 && presenceStorage.getSyncFailureCount(rootId) >= threshold;
     }
 
     private boolean isRawWebSocketSession(String sessionId) {
@@ -217,6 +260,7 @@ public class PresenceSessionManager {
 
             cancelPendingSyncTask(rootId); // 기존 작업이 있다면 취소
 
+            markPendingSync(rootId);
             scheduleSync(rootId, 0, TimeUnit.SECONDS.toMillis(presenceProperties.getSyncDelay()));
         } else {
             // 지연 설정이 없으면 즉시 실행
@@ -255,6 +299,7 @@ public class PresenceSessionManager {
             // 예전에는 여기서 그냥 끝나, 마침 주기 동기화가 잠금을 쥔 순간 나간 방은 마지막 동기화가 사라졌다.
             if (presenceStorage.hasTracker(rootId)) {
                 log.info("[PresenceManager] Sync skipped for rootId={} (user re-connected)", rootId);
+                clearPendingSync(rootId);
                 return;
             }
             int maxAttempts = presenceProperties.getSyncLockRetryAttempts();
@@ -265,11 +310,21 @@ public class PresenceSessionManager {
             } else {
                 log.error("[PresenceManager] 동기화 잠금을 얻지 못해 퇴장 동기화를 포기했다 rootId={} ({}회). "
                         + "캐시는 남아 있고 DB에는 마지막 주기 동기화까지만 반영돼 있다.", rootId, maxAttempts);
+                clearPendingSync(rootId);
             }
             return;
         }
         try {
-            // 실제 실행 시점에 여전히 유저가 없는지 다시 확인
+            syncIfRoomEmpty(rootId);
+        } finally {
+            presenceStorage.releaseSyncLock(rootId, token.get());
+            clearPendingSync(rootId);
+        }
+    }
+
+    /** 잠금을 쥔 상태에서 부른다. 실제 실행 시점에 여전히 유저가 없을 때만 퇴장 동기화를 한다. */
+    private void syncIfRoomEmpty(String rootId) {
+        try {
             if (!presenceStorage.hasTracker(rootId)) {
                 log.info("[PresenceManager] Executing delayed sync for rootId={}", rootId);
                 cacheSyncService.syncToDatabase(rootId);
@@ -280,8 +335,36 @@ public class PresenceSessionManager {
             // 예약 작업 안에서 던지면 ScheduledFuture 에 묻혀 아무 흔적도 남지 않았다.
             // 롤백됐으므로 캐시와 삭제 추적은 그대로 남아 있다.
             log.error("[PresenceManager] 퇴장 동기화 실패 rootId={}: {}", rootId, e.getMessage(), e);
-        } finally {
-            presenceStorage.releaseSyncLock(rootId, token.get());
+            recordSyncFailure(rootId, e);
+        }
+    }
+
+    /** 연속 실패 횟수를 올린다. DB에 닿지 못한 실패는 그 방이 막힌 게 아니라서 세지 않는다. */
+    private void recordSyncFailure(String rootId, Exception e) {
+        if (com.sharedsync.shared.sync.SyncFailureClassifier.isConnectionFailure(e)) {
+            return;
+        }
+        try {
+            presenceStorage.incrementSyncFailure(rootId,
+                    TimeUnit.SECONDS.toMillis(presenceProperties.getSyncFailureCountTtlSeconds()));
+        } catch (Exception ex) {
+            log.warn("[PresenceManager] 연속 실패 횟수 기록 실패 rootId={}: {}", rootId, ex.getMessage());
+        }
+    }
+
+    private void markPendingSync(String rootId) {
+        try {
+            presenceStorage.markPendingSync(rootId, presenceProperties.getPendingSyncMarkerTtlMs());
+        } catch (Exception e) {
+            log.warn("[PresenceManager] 퇴장 동기화 예약 표시 실패 rootId={}: {}", rootId, e.getMessage());
+        }
+    }
+
+    private void clearPendingSync(String rootId) {
+        try {
+            presenceStorage.clearPendingSync(rootId);
+        } catch (Exception e) {
+            log.warn("[PresenceManager] 퇴장 동기화 예약 표시 삭제 실패 rootId={}: {}", rootId, e.getMessage());
         }
     }
 
@@ -293,6 +376,7 @@ public class PresenceSessionManager {
                         "[PresenceManager] [TRACE-F5] Sync task CANCELLED for rootId={} due to user activity. (Success)",
                         rootId);
                 task.cancel(false);
+                clearPendingSync(rootId);
                 return true;
             } else {
                 log.info("[PresenceManager] [TRACE-F5] Sync task found but already DONE for rootId={}", rootId);
@@ -344,8 +428,97 @@ public class PresenceSessionManager {
      * 연결 해제 시 (퇴장)
      */
     public void handleDisconnect(String userId, String sessionId) {
+        if (shutdownHandledSessions.contains(sessionId)) {
+            // 종료 정리({@link #flushOnShutdown})가 이미 처리했다. 웹 서버는 모든 빈이 정리된 맨 마지막에야 세션을
+            // 닫으므로, 그때 오는 퇴장 이벤트는 Redis 가 멈춘 뒤라 처리할 수도 없다.
+            return;
+        }
         String rootId = presenceStorage.removeSessionRootMapping(sessionId);
         performDisconnect(rootId, userId, sessionId);
+    }
+
+    /** 종료 정리가 이미 퇴장 처리한 세션인지. 전송 계층이 늦게 오는 연결 종료 콜백을 건너뛸 때 쓴다. */
+    public boolean isHandledAtShutdown(String sessionId) {
+        return shutdownHandledSessions.contains(sessionId);
+    }
+
+    /**
+     * 정상 종료 때 Redis·DB가 아직 살아 있는 시점에 부른다({@code SharedSyncShutdownLifecycle}).
+     *
+     * <p>예전에는 이 일을 {@code @PreDestroy} 에서 했는데, 그때는 Redis 연결이 이미 멈춰 모든 정리가 실패했다
+     * (유령 접속자, 퇴장 동기화 최대 1시간 지연). 웹 서버 정지는 커넥터만 멈추고 WS 세션은 닫지 않으므로,
+     * 이 파드의 세션은 여기서 직접 퇴장 처리한다.</p>
+     *
+     * <ol>
+     *   <li>이 파드의 남은 세션마다 퇴장 처리. 처리한 세션은 표시해 늦게 오는 연결 종료 콜백이 다시 처리하지 않게 한다.</li>
+     *   <li>이 파드에 예약된 퇴장 동기화를 취소하고 지연 없이 바로 실행한다. 잠금 재시도는 상한 안에서만 한다.</li>
+     * </ol>
+     *
+     * <p>Redis pub/sub 리스너는 이 시점에 이미 멈춰 있으므로 이 경로에서 {@code waitForSync} 를 쓰면 안 된다.</p>
+     */
+    public void flushOnShutdown(long timeoutMillis) {
+        long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMillis);
+        List<String> sessions = new java.util.ArrayList<>(localSessions);
+        log.info("[PresenceManager] 종료 정리 시작: 세션 {}개, 예약된 퇴장 동기화 {}개", sessions.size(),
+                pendingSyncTasks.size());
+
+        for (String sessionId : sessions) {
+            if (System.currentTimeMillis() > deadline) {
+                log.error("[PresenceManager] 종료 정리 시간 초과. 남은 세션 정리를 건너뛴다.");
+                break;
+            }
+            shutdownHandledSessions.add(sessionId);
+            try {
+                String rootId = presenceStorage.removeSessionRootMapping(sessionId);
+                performDisconnect(rootId, null, sessionId);
+            } catch (Exception e) {
+                log.warn("[PresenceManager] 종료 중 세션 정리 실패 sessionId={}: {}", sessionId, e.getMessage());
+            }
+        }
+
+        for (String rootId : new java.util.ArrayList<>(pendingSyncTasks.keySet())) {
+            ScheduledFuture<?> task = pendingSyncTasks.remove(rootId);
+            if (task != null) {
+                task.cancel(false);
+            }
+            runSyncNow(rootId, deadline);
+        }
+        log.info("[PresenceManager] 종료 정리 끝");
+    }
+
+    /** 예약된 퇴장 동기화를 지금 실행한다. 잠금이 잡혀 있으면 상한 안에서 재시도한다. */
+    private void runSyncNow(String rootId, long deadline) {
+        while (true) {
+            java.util.Optional<String> token = presenceStorage.tryAcquireSyncLock(rootId,
+                    presenceProperties.getSyncLockTtlMs());
+            if (token.isPresent()) {
+                try {
+                    syncIfRoomEmpty(rootId);
+                } finally {
+                    presenceStorage.releaseSyncLock(rootId, token.get());
+                    clearPendingSync(rootId);
+                }
+                return;
+            }
+            if (presenceStorage.hasTracker(rootId)) {
+                log.info("[PresenceManager] Sync skipped for rootId={} (user re-connected)", rootId);
+                clearPendingSync(rootId);
+                return;
+            }
+            long interval = Math.max(10L, presenceProperties.getSyncLockRetryIntervalMs());
+            if (System.currentTimeMillis() + interval > deadline) {
+                log.error("[PresenceManager] 종료 중 동기화 잠금을 얻지 못해 마지막 동기화를 못 했다 rootId={}. "
+                        + "캐시는 남아 있고, 다른 파드의 주인 없는 캐시 처리가 저장한다.", rootId);
+                clearPendingSync(rootId);
+                return;
+            }
+            try {
+                Thread.sleep(interval);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private void performDisconnect(String rootId, String userId, String sessionId) {
